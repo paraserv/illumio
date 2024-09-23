@@ -1,0 +1,10 @@
+# Ignore MacOS system files
+.DS_Store
+
+.cursorignore
+
+# Ignore the virtual environment directory
+.venv/
+
+# Ignore log files
+*.log
