@@ -38,6 +38,9 @@ from pathlib import Path
 from typing import Dict, Any, List, Tuple
 import configparser
 import glob
+from logger_config import setup_logger
+from datetime import datetime
+import pytz
 
 # Script version
 __version__ = "1.0.0"
@@ -46,44 +49,32 @@ __version__ = "1.0.0"
 config = configparser.ConfigParser()
 config.read('settings.ini')
 
-# Logging settings
-LOG_FILE = config.get('Logging', 'LOG_FILE')
-LOG_LEVEL = config.get('Logging', 'LOG_LEVEL')
-MAX_LOG_SIZE = config.getint('Logging', 'MAX_LOG_SIZE')
-BACKUP_COUNT = config.getint('Logging', 'BACKUP_COUNT')
-
-# General settings
-BEATNAME = config.get('General', 'BEATNAME')
-
-# Path settings
-DOWNLOADED_FILES_FOLDER = Path(config.get('Paths', 'DOWNLOADED_FILES_FOLDER'))
-
-# Syslog settings
+# Constants
+BASE_FOLDER = Path(config.get('Paths', 'BASE_FOLDER', fallback=os.getcwd()))
+DOWNLOADED_FILES_FOLDER = BASE_FOLDER / config.get('Paths', 'DOWNLOADED_FILES_FOLDER', fallback='.')
+LOG_FOLDER = BASE_FOLDER / config.get('Paths', 'LOG_FOLDER', fallback='logs')
+BEATNAME = config.get('General', 'BEATNAME', fallback='IllumioCustomBeat')
 SMA_HOST = config.get('Syslog', 'SMA_HOST')
-SMA_PORT = config.getint('Syslog', 'SMA_PORT')
-USE_TCP = config.getboolean('Syslog', 'USE_TCP')
-MAX_MESSAGE_LENGTH = config.getint('Syslog', 'MAX_MESSAGE_LENGTH')
+SMA_PORT = config.getint('Syslog', 'SMA_PORT', fallback=514)
+USE_TCP = config.getboolean('Syslog', 'USE_TCP', fallback=False)
+MAX_MESSAGE_LENGTH = config.getint('Syslog', 'MAX_MESSAGE_LENGTH', fallback=1024)
+MAX_WORKERS = config.getint('Processing', 'MAX_WORKERS', fallback=4)
 
-# Processing settings
-MAX_WORKERS = config.getint('Processing', 'MAX_WORKERS')
+# Add these lines after the existing constants (around line 61)
+LOG_FILE = LOG_FOLDER / config.get('Logging', 'LOG_FILE', fallback='app.log')
+BACKUP_COUNT = config.getint('Logging', 'BACKUP_COUNT', fallback=2)
 
 # Set up logging
-logger = logging.getLogger(__name__)
-logger.setLevel(getattr(logging, LOG_LEVEL.upper()))
-handler = RotatingFileHandler(LOG_FILE, maxBytes=MAX_LOG_SIZE, backupCount=BACKUP_COUNT)
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
+logger = setup_logger('illumio_to_lr')
 
-# Now we can use logger
-logger.info(f"BACKUP_COUNT set to: {BACKUP_COUNT}")
+logger.info(f"Script started with configuration: BEATNAME={BEATNAME}, BASE_FOLDER={BASE_FOLDER}, DOWNLOADED_FILES_FOLDER={DOWNLOADED_FILES_FOLDER}, LOG_FOLDER={LOG_FOLDER}, SMA_HOST={SMA_HOST}, SMA_PORT={SMA_PORT}, USE_TCP={USE_TCP}, MAX_MESSAGE_LENGTH={MAX_MESSAGE_LENGTH}, MAX_WORKERS={MAX_WORKERS}")
 
-def cleanup_old_logs(log_file: str, backup_count: int):
+def cleanup_old_logs(log_file: Path, backup_count: int):
     """Remove old log files exceeding the backup count."""
-    base_name = log_file.replace('.log', '')
-    log_files = glob.glob(f"{base_name}*.log*")
+    base_name = log_file.stem
+    log_files = list(log_file.parent.glob(f"{base_name}*.log*"))
     logger.info(f"Found {len(log_files)} log files matching {base_name}*.log*")
-    log_files.sort(key=os.path.getmtime, reverse=True)
+    log_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
     
     # Keep the current log file and up to backup_count rotated files
     files_to_keep = backup_count + 1
@@ -91,7 +82,7 @@ def cleanup_old_logs(log_file: str, backup_count: int):
     if len(log_files) > files_to_keep:
         for old_log in log_files[files_to_keep:]:
             try:
-                os.remove(old_log)
+                old_log.unlink()
                 logger.info(f"Removed old log file: {old_log}")
             except Exception as e:
                 logger.error(f"Failed to remove old log file {old_log}: {e}")
@@ -99,12 +90,12 @@ def cleanup_old_logs(log_file: str, backup_count: int):
         logger.info(f"No log files to remove. Current count ({len(log_files)}) does not exceed limit ({files_to_keep})")
 
     # Verify cleanup
-    remaining_files = glob.glob(f"{base_name}*.log*")
+    remaining_files = list(log_file.parent.glob(f"{base_name}*.log*"))
     logger.info(f"After cleanup: {len(remaining_files)} log files remaining")
 
 # Clean up old log files
 cleanup_old_logs(LOG_FILE, BACKUP_COUNT)
-cleanup_old_logs('illumio_log_sender.log', BACKUP_COUNT)
+cleanup_old_logs(LOG_FOLDER / 'illumio_log_sender.log', BACKUP_COUNT)
 
 def is_port_open(host: str, port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -237,60 +228,75 @@ def format_log_for_siem(transformed_log: Dict[str, Any], original_log: Dict[str,
     
     return '|'.join(formatted_fields) + f"|original_message={escaped_json}"
 
-def send_logs(logs: List[Tuple[Dict[str, Any], Dict[str, Any]]], host: str, port: int):
-    if not is_port_open(host, port):
-        logger.error(f"Port {port} is not open on host {host}. Unable to send logs.")
-        return
-
-    logger.info(f"Attempting to send {len(logs)} logs to {host}:{port} via {'TCP' if USE_TCP else 'UDP'}")
+def send_syslog_message(message, host, port, use_tcp=False):
+    """Send a syslog message to the specified host and port."""
+    sock = None
     try:
-        sock_type = socket.SOCK_STREAM if USE_TCP else socket.SOCK_DGRAM
-        with socket.socket(socket.AF_INET, sock_type) as sock:
-            if USE_TCP:
-                sock.connect((host, port))
-            for transformed_log, original_log in logs:
-                formatted_log = format_log_for_siem(transformed_log, original_log)
-                syslog_message = f"<{transformed_log['device_type']}> {formatted_log}"
-                if USE_TCP:
-                    sock.sendall(syslog_message.encode() + b'\n')
-                else:
-                    sock.sendto(syslog_message.encode(), (host, port))
-                logger.debug(f"Sent syslog message: {syslog_message}")
-        logger.info(f"Successfully sent all {len(logs)} log entries")
-    except Exception as e:
-        logger.error(f"Failed to send logs to {host}:{port}: {e}")
-        raise
-
-def process_log_file(log_file: Path, sma_host: str, sma_port: int, folder_type: str):
-    try:
-        logger.info(f"Processing file: {log_file}")
-        with log_file.open('r') as f:
-            logs = [json.loads(line.strip()) for line in f if line.strip()]
-        if logs:
-            transformed_logs = [(transform_log_based_on_policy(log, folder_type), log) for log in logs]
-            send_logs(transformed_logs, sma_host, sma_port)
-            logger.info(f"Log processing completed successfully for {log_file}")
+        if use_tcp:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         else:
-            logger.warning(f"No valid log entries found in {log_file}")
-    except json.JSONDecodeError:
-        logger.error(f"Error decoding JSON in file {log_file}")
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        
+        sock.connect((host, port))
+        sock.sendall(message.encode('utf-8'))
+        logger.debug(f"Sent message: {message[:100]}...")  # Log first 100 chars of the message
+    except socket.error as e:
+        logger.error(f"Socket error when sending syslog message: {e}")
     except Exception as e:
-        logger.error(f"Error during log processing for {log_file}: {e}")
+        logger.error(f"Unexpected error when sending syslog message: {e}")
+    finally:
+        if sock:
+            sock.close()
+
+def process_log_file(file_path, sma_host, sma_port, folder_type):
+    """Process a single log file and send its contents as syslog messages."""
+    try:
+        with open(file_path, 'r') as f:
+            for line in f:
+                try:
+                    # Parse the JSON data
+                    data = json.loads(line)
+                    
+                    # Add custom fields
+                    data['beat'] = {
+                        'name': BEATNAME,
+                        'hostname': socket.gethostname(),
+                        'version': '1.0.0'
+                    }
+                    data['@timestamp'] = datetime.now(pytz.UTC).isoformat()
+                    data['type'] = folder_type
+                    
+                    # Convert back to JSON string
+                    json_str = json.dumps(data)
+                    
+                    # Truncate if necessary
+                    if len(json_str) > MAX_MESSAGE_LENGTH:
+                        logger.warning(f"Message exceeds max length, truncating: {file_path}")
+                        json_str = json_str[:MAX_MESSAGE_LENGTH]
+                    
+                    # Send as syslog message
+                    send_syslog_message(json_str, sma_host, sma_port, USE_TCP)
+                except json.JSONDecodeError:
+                    logger.error(f"Invalid JSON in file {file_path}")
+                except Exception as e:
+                    logger.error(f"Error processing line in {file_path}: {e}")
+        
+        # After processing, delete the file
+        os.remove(file_path)
+        logger.info(f"Processed and deleted file: {file_path}")
+    except Exception as e:
+        logger.error(f"Error processing file {file_path}: {e}")
 
 def main():
     try:
         logger.info("Starting Illumio log processing")
-        logger.info("Cleaning up old log files...")
-        cleanup_old_logs(LOG_FILE, BACKUP_COUNT)
-        cleanup_old_logs('illumio_log_sender.log', BACKUP_COUNT)
-        
         if not DOWNLOADED_FILES_FOLDER.exists():
             logger.error(f"Downloaded files folder does not exist: {DOWNLOADED_FILES_FOLDER}")
             return
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             for folder_type in ['auditable_events', 'summaries']:
-                folder_path = DOWNLOADED_FILES_FOLDER / 'illumio' / folder_type
+                folder_path = DOWNLOADED_FILES_FOLDER / folder_type
                 if not folder_path.exists():
                     logger.warning(f"Folder does not exist: {folder_path}")
                     continue
