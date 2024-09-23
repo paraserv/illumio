@@ -41,6 +41,7 @@ import glob
 from logger_config import setup_logger
 from datetime import datetime
 import pytz
+import time
 
 # Script version
 __version__ = "1.0.0"
@@ -214,76 +215,66 @@ def transform_log_based_on_policy(log_entry: Dict[str, Any], folder_type: str) -
 def format_log_for_siem(transformed_log: Dict[str, Any], original_log: Dict[str, Any]) -> str:
     formatted_fields = []
     for k, v in transformed_log.items():
-        if v:
+        if v is not None and v != '':  # Only include non-empty fields
             v = str(v).replace('|', '_')
             formatted_fields.append(f"{k}={v}")
+    
+    formatted_log = '|'.join(formatted_fields)
     
     original_json = json.dumps(original_log)
     escaped_json = original_json.replace('|', '_')
     
     # Truncate the original message if it's too long
-    max_original_length = MAX_MESSAGE_LENGTH - len('|'.join(formatted_fields)) - len("original_message=")
+    max_original_length = MAX_MESSAGE_LENGTH - len(formatted_log) - len("|original_message=")
     if len(escaped_json) > max_original_length:
         escaped_json = escaped_json[:max_original_length-3] + "..."
     
-    return '|'.join(formatted_fields) + f"|original_message={escaped_json}"
+    return f"{formatted_log}|original_message={escaped_json}"
 
-def send_syslog_message(message, host, port, use_tcp=False):
-    """Send a syslog message to the specified host and port."""
-    sock = None
+def send_logs(logs: List[Tuple[Dict[str, Any], Dict[str, Any]]], host: str, port: int):
+    if not is_port_open(host, port):
+        logger.error(f"Port {port} is not open on host {host}. Unable to send logs.")
+        return
+
+    logger.info(f"Attempting to send {len(logs)} logs to {host}:{port} via {'TCP' if USE_TCP else 'UDP'}")
     try:
-        if use_tcp:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        else:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        
-        sock.connect((host, port))
-        sock.sendall(message.encode('utf-8'))
-        logger.debug(f"Sent message: {message[:100]}...")  # Log first 100 chars of the message
-    except socket.error as e:
-        logger.error(f"Socket error when sending syslog message: {e}")
+        sock_type = socket.SOCK_STREAM if USE_TCP else socket.SOCK_DGRAM
+        with socket.socket(socket.AF_INET, sock_type) as sock:
+            if USE_TCP:
+                sock.connect((host, port))
+            for transformed_log, original_log in logs:
+                formatted_log = format_log_for_siem(transformed_log, original_log)
+                current_time = time.strftime("%m %d %Y %H:%M:%S", time.localtime())
+                syslog_ip = socket.gethostbyname(socket.gethostname())
+                syslog_message = f"{current_time} {syslog_ip} <USER:NOTE> {formatted_log}"
+                if USE_TCP:
+                    sock.sendall(syslog_message.encode() + b'\n')
+                else:
+                    sock.sendto(syslog_message.encode(), (host, port))
+                logger.debug(f"Sent syslog message: {syslog_message}")
+        logger.info(f"Successfully sent all {len(logs)} log entries")
     except Exception as e:
-        logger.error(f"Unexpected error when sending syslog message: {e}")
-    finally:
-        if sock:
-            sock.close()
+        logger.error(f"Failed to send logs to {host}:{port}: {e}")
+        raise
 
 def process_log_file(file_path, sma_host, sma_port, folder_type):
     """Process a single log file and send its contents as syslog messages."""
     try:
+        logger.info(f"Processing file: {file_path}")
         with open(file_path, 'r') as f:
-            for line in f:
-                try:
-                    # Parse the JSON data
-                    data = json.loads(line)
-                    
-                    # Add custom fields
-                    data['beat'] = {
-                        'name': BEATNAME,
-                        'hostname': socket.gethostname(),
-                        'version': '1.0.0'
-                    }
-                    data['@timestamp'] = datetime.now(pytz.UTC).isoformat()
-                    data['type'] = folder_type
-                    
-                    # Convert back to JSON string
-                    json_str = json.dumps(data)
-                    
-                    # Truncate if necessary
-                    if len(json_str) > MAX_MESSAGE_LENGTH:
-                        logger.warning(f"Message exceeds max length, truncating: {file_path}")
-                        json_str = json_str[:MAX_MESSAGE_LENGTH]
-                    
-                    # Send as syslog message
-                    send_syslog_message(json_str, sma_host, sma_port, USE_TCP)
-                except json.JSONDecodeError:
-                    logger.error(f"Invalid JSON in file {file_path}")
-                except Exception as e:
-                    logger.error(f"Error processing line in {file_path}: {e}")
+            logs = [json.loads(line.strip()) for line in f if line.strip()]
+        if logs:
+            transformed_logs = [(transform_log_based_on_policy(log, folder_type), log) for log in logs]
+            send_logs(transformed_logs, sma_host, sma_port)
+            logger.info(f"Log processing completed successfully for {file_path}")
+        else:
+            logger.warning(f"No valid log entries found in {file_path}")
         
         # After processing, delete the file
         os.remove(file_path)
         logger.info(f"Processed and deleted file: {file_path}")
+    except json.JSONDecodeError:
+        logger.error(f"Error decoding JSON in file {file_path}")
     except Exception as e:
         logger.error(f"Error processing file {file_path}: {e}")
 
