@@ -8,3 +8,4 @@
 
 # Ignore log files
 *.log
+downloaded_logs/**
