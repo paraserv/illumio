@@ -8,7 +8,7 @@ import pytz
 import tempfile
 from tqdm import tqdm
 
-# Constants
+# Constants.
 LOG_FOLDER = '/Users/nathan/dev/illumio/downloaded_logs'
 S3_BUCKET_NAME = os.environ.get('S3_BUCKET_NAME')
 
