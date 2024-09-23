@@ -7,10 +7,21 @@ import gzip
 import pytz
 import tempfile
 from tqdm import tqdm
+from dotenv import load_dotenv
+import configparser
 
-# Constants.
-LOG_FOLDER = '/Users/nathan/dev/illumio/downloaded_logs'
-S3_BUCKET_NAME = os.environ.get('S3_BUCKET_NAME')
+# Load environment variables
+load_dotenv()
+
+# Load configuration
+config = configparser.ConfigParser()
+config.read('settings.ini')
+
+# Constants
+LOG_FOLDER = config.get('Paths', 'LOG_FOLDER')
+S3_BUCKET_NAME = os.getenv('S3_BUCKET_NAME')
+MINUTES = config.getint('S3', 'MINUTES')
+MAX_FILES_PER_FOLDER = config.getint('S3', 'MAX_FILES_PER_FOLDER')
 
 def generate_prefixes(start_date, end_date):
     """Generate a list of prefixes to search based on the date range."""
@@ -137,14 +148,14 @@ def list_recent_logs(bucket_name, minutes=30, max_files_per_folder=5):
 
 def main():
     if not S3_BUCKET_NAME:
-        print("Error: S3_BUCKET_NAME environment variable is not set.")
-        print("Please set it using: export S3_BUCKET_NAME='your-bucket-name'")
+        print("Error: S3_BUCKET_NAME is not set in settings.ini.")
+        print("Please set it in the [S3] section of settings.ini")
         sys.exit(1)
 
     # Ensure the LOG_FOLDER exists
     os.makedirs(LOG_FOLDER, exist_ok=True)
 
-    list_recent_logs(S3_BUCKET_NAME, minutes=30, max_files_per_folder=5)
+    list_recent_logs(S3_BUCKET_NAME, minutes=MINUTES, max_files_per_folder=MAX_FILES_PER_FOLDER)
 
 if __name__ == "__main__":
     main()

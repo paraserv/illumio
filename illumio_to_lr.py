@@ -46,17 +46,26 @@ __version__ = "1.0.0"
 config = configparser.ConfigParser()
 config.read('settings.ini')
 
-LOG_FILE = config.get('Logging', 'LOG_FILE', fallback='illumio_to_lr.log')
-LOG_LEVEL = config.get('Logging', 'LOG_LEVEL', fallback='INFO')
-MAX_LOG_SIZE = config.getint('Logging', 'MAX_LOG_SIZE', fallback=10*1024*1024)  # Default 10 MB
-BACKUP_COUNT = config.getint('Logging', 'BACKUP_COUNT', fallback=5)
-BEATNAME = config.get('General', 'BEATNAME', fallback='IllumioS3')
+# Logging settings
+LOG_FILE = config.get('Logging', 'LOG_FILE')
+LOG_LEVEL = config.get('Logging', 'LOG_LEVEL')
+MAX_LOG_SIZE = config.getint('Logging', 'MAX_LOG_SIZE')
+BACKUP_COUNT = config.getint('Logging', 'BACKUP_COUNT')
+
+# General settings
+BEATNAME = config.get('General', 'BEATNAME')
+
+# Path settings
 DOWNLOADED_FILES_FOLDER = Path(config.get('Paths', 'DOWNLOADED_FILES_FOLDER'))
+
+# Syslog settings
 SMA_HOST = config.get('Syslog', 'SMA_HOST')
 SMA_PORT = config.getint('Syslog', 'SMA_PORT')
-USE_TCP = config.getboolean('Syslog', 'USE_TCP', fallback=False)
-MAX_MESSAGE_LENGTH = config.getint('Syslog', 'MAX_MESSAGE_LENGTH', fallback=1024)
-MAX_WORKERS = config.getint('Processing', 'MAX_WORKERS', fallback=5)
+USE_TCP = config.getboolean('Syslog', 'USE_TCP')
+MAX_MESSAGE_LENGTH = config.getint('Syslog', 'MAX_MESSAGE_LENGTH')
+
+# Processing settings
+MAX_WORKERS = config.getint('Processing', 'MAX_WORKERS')
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -275,21 +284,20 @@ def main():
         cleanup_old_logs(LOG_FILE, BACKUP_COUNT)
         cleanup_old_logs('illumio_log_sender.log', BACKUP_COUNT)
         
-        illumio_folder = DOWNLOADED_FILES_FOLDER / 'illumio'
-        if not illumio_folder.exists():
-            logger.error(f"Illumio folder does not exist: {illumio_folder}")
+        if not DOWNLOADED_FILES_FOLDER.exists():
+            logger.error(f"Downloaded files folder does not exist: {DOWNLOADED_FILES_FOLDER}")
             return
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             for folder_type in ['auditable_events', 'summaries']:
-                folder_path = illumio_folder / folder_type
+                folder_path = DOWNLOADED_FILES_FOLDER / 'illumio' / folder_type
                 if not folder_path.exists():
                     logger.warning(f"Folder does not exist: {folder_path}")
                     continue
 
                 logger.info(f"Processing folder: {folder_path}")
-                log_files = list(folder_path.glob('*'))  # This will find all files
-                log_files = [f for f in log_files if f.is_file()]  # Ensure we only process files, not directories
+                log_files = list(folder_path.glob('*'))
+                log_files = [f for f in log_files if f.is_file()]
                 logger.info(f"Found {len(log_files)} log files in {folder_path}")
                 
                 for file_path in log_files:
