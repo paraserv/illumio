@@ -43,6 +43,20 @@ from logger_config import setup_logger
 from datetime import datetime
 import pytz
 import time
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from the .env file
+load_dotenv()
+
+# Retrieve SIEM configuration from environment variables
+SMA_HOST = os.getenv('SMA_HOST')
+SMA_PORT = int(os.getenv('SMA_PORT', 514))  # Default to port 514 if not specified
+USE_TCP = os.getenv('USE_TCP', 'False').lower() == 'true'  # Convert string to boolean
+
+# Retrieve application performance configuration
+MAX_MESSAGE_LENGTH = int(os.getenv('MAX_MESSAGE_LENGTH', 2048))  # Default to 2048 bytes
+MAX_WORKERS = int(os.getenv('MAX_WORKERS', 10))  # Default to 10 workers
 
 # Script version
 __version__ = "1.0.0"
@@ -62,11 +76,6 @@ BASE_FOLDER = (script_dir / config.get('Paths', 'BASE_FOLDER', fallback='..')).r
 DOWNLOADED_FILES_FOLDER = BASE_FOLDER / config.get('Paths', 'DOWNLOADED_FILES_FOLDER', fallback='illumio')
 LOG_FOLDER = BASE_FOLDER / config.get('Paths', 'LOG_FOLDER', fallback='logs')
 BEATNAME = config.get('General', 'BEATNAME', fallback='IllumioCustomBeat')
-SMA_HOST = config.get('Syslog', 'SMA_HOST')
-SMA_PORT = config.getint('Syslog', 'SMA_PORT', fallback=514)
-USE_TCP = config.getboolean('Syslog', 'USE_TCP', fallback=False)
-MAX_MESSAGE_LENGTH = config.getint('Syslog', 'MAX_MESSAGE_LENGTH', fallback=1024)
-MAX_WORKERS = config.getint('Processing', 'MAX_WORKERS', fallback=4)
 
 # Add these lines after the existing constants (around line 61)
 LOG_FILE = LOG_FOLDER / config.get('Logging', 'LOG_FILE', fallback='app.log')
