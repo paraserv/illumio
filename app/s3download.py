@@ -12,8 +12,14 @@ from dotenv import load_dotenv
 import configparser
 from pathlib import Path
 
-# Load environment variables from the .env file
-load_dotenv()
+# Get the directory where the script is located
+script_dir = Path(__file__).parent
+
+# Construct the full path to the .env file in the parent directory
+env_path = script_dir.parent / '.env'
+
+# Load environment variables from the .env file located in the parent directory
+load_dotenv(dotenv_path=env_path)
 
 # Retrieve AWS credentials from environment variables
 AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
@@ -22,9 +28,6 @@ S3_BUCKET_NAME = os.getenv('S3_BUCKET_NAME')
 
 # Set up logging
 logger = setup_logger('s3download')
-
-# Get the directory where the script is located
-script_dir = Path(__file__).parent
 
 # Construct the path to settings.ini
 settings_file = script_dir / 'settings.ini'
@@ -180,6 +183,10 @@ def main():
     if not S3_BUCKET_NAME:
         logger.error("Error: S3_BUCKET_NAME is not set in environment variables (.env file).")
         logger.error("Please set it in the .env file.")
+        sys.exit(1)
+
+    if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
+        logger.error("AWS credentials are not set in environment variables (.env file). Please set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.")
         sys.exit(1)
 
     # Ensure the LOG_FOLDER exists

@@ -6,8 +6,8 @@ Illumio to LogRhythm Log Processor
 
 This script processes Illumio Cloud log files and forwards them to the LogRhythm SIEM
 via syslog. It handles both auditable events and summaries, transforming the
-logs into a format compatible with LogRhythm's parsing requirements, which happens to
-match the Syslog - Open Collector base MPE regex rule.
+logs into a format compatible with LogRhythm's parsing requirements, which matches
+the Syslog - Open Collector base MPE regex rule.
 
 Features:
 - Configurable via settings.ini file
@@ -28,74 +28,93 @@ Requirements:
 """
 
 import json
-import logging
-import os
 import socket
-import sys
-from concurrent.futures import ThreadPoolExecutor
-from logging.handlers import RotatingFileHandler
-from pathlib import Path
-from typing import Dict, Any, List, Tuple
-import configparser
-from pathlib import Path
-import glob
-from logger_config import setup_logger
-from datetime import datetime
-import pytz
+import logging
 import time
-from dotenv import load_dotenv
 import os
+import sys
+from pathlib import Path
+from dotenv import load_dotenv
+import configparser
+from concurrent.futures import ThreadPoolExecutor
+from typing import List, Tuple, Dict, Any
 
-# Load environment variables from the .env file
-load_dotenv()
+from logger_config import setup_logger
 
-# Retrieve SIEM configuration from environment variables
-SMA_HOST = os.getenv('SMA_HOST')
-SMA_PORT = int(os.getenv('SMA_PORT', 514))  # Default to port 514 if not specified
-USE_TCP = os.getenv('USE_TCP', 'False').lower() == 'true'  # Convert string to boolean
-
-# Retrieve application performance configuration
-MAX_MESSAGE_LENGTH = int(os.getenv('MAX_MESSAGE_LENGTH', 2048))  # Default to 2048 bytes
-MAX_WORKERS = int(os.getenv('MAX_WORKERS', 10))  # Default to 10 workers
-
-# Script version
-__version__ = "1.0.0"
+# Set up logging immediately after imports
+logger = setup_logger('illumio_to_lr')
 
 # Get the directory where the script is located
 script_dir = Path(__file__).parent
 
-# Construct the path to settings.ini
+# Construct the path to settings.ini and .env
 settings_file = script_dir / 'settings.ini'
+env_path = script_dir.parent / '.env'
+
+# Log the paths for debugging
+logger.debug(f"Script directory: {script_dir}")
+logger.debug(f"Loading .env from: {env_path}")
+logger.debug(f"Loading settings.ini from: {settings_file}")
+
+# Load environment variables from the .env file
+load_dotenv(dotenv_path=env_path)
 
 # Load configuration with interpolation disabled
 config = configparser.ConfigParser(interpolation=None)
 config.read(settings_file)
+
+# Debugging: Log the sections loaded from settings.ini
+logger.debug(f"Config sections: {config.sections()}")
 
 # Constants
 BASE_FOLDER = (script_dir / config.get('Paths', 'BASE_FOLDER', fallback='..')).resolve()
 DOWNLOADED_FILES_FOLDER = BASE_FOLDER / config.get('Paths', 'DOWNLOADED_FILES_FOLDER', fallback='illumio')
 LOG_FOLDER = BASE_FOLDER / config.get('Paths', 'LOG_FOLDER', fallback='logs')
 BEATNAME = config.get('General', 'BEATNAME', fallback='IllumioCustomBeat')
-
-# Add these lines after the existing constants (around line 61)
 LOG_FILE = LOG_FOLDER / config.get('Logging', 'LOG_FILE', fallback='app.log')
 BACKUP_COUNT = config.getint('Logging', 'BACKUP_COUNT', fallback=2)
 
-# Set up logging
-logger = setup_logger('illumio_to_lr')
+# Retrieve SIEM configuration from environment variables or settings.ini
+sma_host_from_env = os.getenv('SMA_HOST')
+sma_host_from_config = config.get('Syslog', 'SMA_HOST', fallback=None)
+SMA_HOST = sma_host_from_env or sma_host_from_config
 
-logger.info(f"Script started with configuration: BEATNAME={BEATNAME}, BASE_FOLDER={BASE_FOLDER}, DOWNLOADED_FILES_FOLDER={DOWNLOADED_FILES_FOLDER}, LOG_FOLDER={LOG_FOLDER}, SMA_HOST={SMA_HOST}, SMA_PORT={SMA_PORT}, USE_TCP={USE_TCP}, MAX_MESSAGE_LENGTH={MAX_MESSAGE_LENGTH}, MAX_WORKERS={MAX_WORKERS}")
+SMA_PORT = int(os.getenv('SMA_PORT', config.get('Syslog', 'SMA_PORT', fallback='514')))
+USE_TCP = os.getenv('USE_TCP', config.get('Syslog', 'USE_TCP', fallback='False')).lower() == 'true'
+MAX_MESSAGE_LENGTH = int(os.getenv('MAX_MESSAGE_LENGTH', config.get('Syslog', 'MAX_MESSAGE_LENGTH', fallback='2048')))
+MAX_WORKERS = int(os.getenv('MAX_WORKERS', config.get('Processing', 'MAX_WORKERS', fallback='10')))
 
+# Log the initial configuration
+logger.info(f"Script started with configuration:")
+logger.info(f"  BEATNAME={BEATNAME}")
+logger.info(f"  BASE_FOLDER={BASE_FOLDER}")
+logger.info(f"  DOWNLOADED_FILES_FOLDER={DOWNLOADED_FILES_FOLDER}")
+logger.info(f"  LOG_FOLDER={LOG_FOLDER}")
+logger.info(f"  SMA_HOST={SMA_HOST}")
+logger.info(f"  SMA_PORT={SMA_PORT}")
+logger.info(f"  USE_TCP={USE_TCP}")
+logger.info(f"  MAX_MESSAGE_LENGTH={MAX_MESSAGE_LENGTH}")
+logger.info(f"  MAX_WORKERS={MAX_WORKERS}")
+
+# Check if SMA_HOST is set
+if not SMA_HOST:
+    logger.error("SMA_HOST is not set in environment variables or settings.ini")
+    sys.exit(1)
+if not SMA_PORT:
+    logger.error("SMA_PORT is not set; defaulting to 514")
+    SMA_PORT = 514
+
+# Function to clean up old log files
 def cleanup_old_logs(log_file: Path, backup_count: int):
     """Remove old log files exceeding the backup count."""
     base_name = log_file.stem
     log_files = list(log_file.parent.glob(f"{base_name}*.log*"))
     logger.info(f"Found {len(log_files)} log files matching {base_name}*.log*")
     log_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-    
+
     # Keep the current log file and up to backup_count rotated files
     files_to_keep = backup_count + 1
-    
+
     if len(log_files) > files_to_keep:
         for old_log in log_files[files_to_keep:]:
             try:
@@ -114,10 +133,19 @@ def cleanup_old_logs(log_file: Path, backup_count: int):
 cleanup_old_logs(LOG_FILE, BACKUP_COUNT)
 cleanup_old_logs(LOG_FOLDER / 'illumio_log_sender.log', BACKUP_COUNT)
 
+# Function to check if port is open
 def is_port_open(host: str, port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        result = s.connect_ex((host, port))
-        return result == 0
+    try:
+        with socket.create_connection((host, port), timeout=5):
+            return True
+    except (socket.timeout, socket.error) as e:
+        logger.error(f"Port {port} on host {host} is not open: {e}")
+        return False
+
+# Check if the syslog server port is open
+if not is_port_open(SMA_HOST, SMA_PORT):
+    logger.error(f"Cannot connect to {SMA_HOST}:{SMA_PORT}. Please check the network connection and syslog server.")
+    sys.exit(1)
 
 def transform_log_based_on_policy(log_entry: Dict[str, Any], folder_type: str) -> Dict[str, Any]:
     device_type = 'IllumioAudit' if folder_type == 'auditable_events' else 'IllumioSummary'
@@ -128,7 +156,7 @@ def transform_log_based_on_policy(log_entry: Dict[str, Any], folder_type: str) -
         'fullyqualifiedbeatname': BEATNAME,
     }
 
-    # Define the order of fields as per the provided list
+    # Define the order of fields as per the given list
     field_order = [
         'time', 'object', 'objectname', 'objecttype', 'hash', 'policy', 'result', 'url', 'useragent',
         'responsecode', 'subject', 'version', 'command', 'reason', 'action', 'status', 'sessiontype',
@@ -215,15 +243,13 @@ def transform_log_based_on_policy(log_entry: Dict[str, Any], folder_type: str) -
 
     # Create the final ordered result, ensuring required fields are first
     ordered_result = {
-        'beatname': result['beatname'],
+        'beatname': BEATNAME,
         'device_type': result['device_type'],
-        'fullyqualifiedbeatname': result['fullyqualifiedbeatname']
+        'fullyqualifiedbeatname': BEATNAME
     }
     for field in field_order:
         if field in result and result[field] is not None:
             ordered_result[field] = result[field]
-
-    # Add original_message as the last field
     ordered_result['original_message'] = ''
 
     return ordered_result
@@ -248,10 +274,6 @@ def format_log_for_siem(transformed_log: Dict[str, Any], original_log: Dict[str,
     return f"{formatted_log}|original_message={escaped_json}"
 
 def send_logs(logs: List[Tuple[Dict[str, Any], Dict[str, Any]]], host: str, port: int):
-    if not is_port_open(host, port):
-        logger.error(f"Port {port} is not open on host {host}. Unable to send logs.")
-        return
-
     logger.info(f"Attempting to send {len(logs)} logs to {host}:{port} via {'TCP' if USE_TCP else 'UDP'}")
     try:
         sock_type = socket.SOCK_STREAM if USE_TCP else socket.SOCK_DGRAM
@@ -260,7 +282,7 @@ def send_logs(logs: List[Tuple[Dict[str, Any], Dict[str, Any]]], host: str, port
                 sock.connect((host, port))
             for transformed_log, original_log in logs:
                 formatted_log = format_log_for_siem(transformed_log, original_log)
-                current_time = time.strftime("%m %d %Y %H:%M:%S", time.localtime())
+                current_time = time.strftime("%b %d %Y %H:%M:%S", time.localtime())
                 syslog_ip = socket.gethostbyname(socket.gethostname())
                 syslog_message = f"{current_time} {syslog_ip} <USER:NOTE> {formatted_log}"
                 if USE_TCP:
