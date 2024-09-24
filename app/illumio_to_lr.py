@@ -37,6 +37,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
 import configparser
+from pathlib import Path
 import glob
 from logger_config import setup_logger
 from datetime import datetime
@@ -46,13 +47,19 @@ import time
 # Script version
 __version__ = "1.0.0"
 
-# Load configuration
-config = configparser.ConfigParser()
-config.read('settings.ini')
+# Get the directory where the script is located
+script_dir = Path(__file__).parent
+
+# Construct the path to settings.ini
+settings_file = script_dir / 'settings.ini'
+
+# Load configuration with interpolation disabled
+config = configparser.ConfigParser(interpolation=None)
+config.read(settings_file)
 
 # Constants
-BASE_FOLDER = Path(config.get('Paths', 'BASE_FOLDER', fallback=os.getcwd()))
-DOWNLOADED_FILES_FOLDER = BASE_FOLDER / config.get('Paths', 'DOWNLOADED_FILES_FOLDER', fallback='.')
+BASE_FOLDER = (script_dir / config.get('Paths', 'BASE_FOLDER', fallback='..')).resolve()
+DOWNLOADED_FILES_FOLDER = BASE_FOLDER / config.get('Paths', 'DOWNLOADED_FILES_FOLDER', fallback='illumio')
 LOG_FOLDER = BASE_FOLDER / config.get('Paths', 'LOG_FOLDER', fallback='logs')
 BEATNAME = config.get('General', 'BEATNAME', fallback='IllumioCustomBeat')
 SMA_HOST = config.get('Syslog', 'SMA_HOST')

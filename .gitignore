@@ -11,3 +11,8 @@
 # Ignore log files
 *.log
 downloaded_logs/**
+
+# Python bytecode files
+__pycache__/
+*.py[cod]
+*$py.class

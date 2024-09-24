@@ -12,21 +12,31 @@ from dotenv import load_dotenv
 import configparser
 from pathlib import Path
 
-# Load environment variables
+# Load environment variables from the .env file
 load_dotenv()
+
+# Retrieve AWS credentials from environment variables
+AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
+AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
+S3_BUCKET_NAME = os.getenv('S3_BUCKET_NAME')
 
 # Set up logging
 logger = setup_logger('s3download')
 
-# Load configuration
-config = configparser.ConfigParser()
-config.read('settings.ini')
+# Get the directory where the script is located
+script_dir = Path(__file__).parent
+
+# Construct the path to settings.ini
+settings_file = script_dir / 'settings.ini'
+
+# Load configuration with interpolation disabled
+config = configparser.ConfigParser(interpolation=None)
+config.read(settings_file)
 
 # Constants
-BASE_FOLDER = Path(config.get('Paths', 'BASE_FOLDER', fallback=os.getcwd()))
+BASE_FOLDER = (script_dir / config.get('Paths', 'BASE_FOLDER', fallback='..')).resolve()
 DOWNLOADED_FILES_FOLDER = BASE_FOLDER / config.get('Paths', 'DOWNLOADED_FILES_FOLDER', fallback='illumio')
 LOG_FOLDER = BASE_FOLDER / config.get('Paths', 'LOG_FOLDER', fallback='logs')
-S3_BUCKET_NAME = os.getenv('S3_BUCKET_NAME')
 MINUTES = config.getint('S3', 'MINUTES', fallback=30)
 MAX_FILES_PER_FOLDER = config.getint('S3', 'MAX_FILES_PER_FOLDER', fallback=5)
 
@@ -46,29 +56,34 @@ def generate_prefixes(start_date, end_date):
 
 def list_recent_logs(bucket_name, minutes=30, max_files_per_folder=5):
     """
-    List and analyze the most recent logs in the S3 bucket from the last 30 minutes,
-    limited to a maximum of 5 files per folder.
+    List and analyze the most recent logs in the S3 bucket from the last 'minutes',
+    limited to a maximum of 'max_files_per_folder' files per folder.
     """
     try:
-        s3 = boto3.client('s3')
-        
+        # Create a session with explicit AWS credentials
+        session = boto3.Session(
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        )
+        s3 = session.client('s3')
+
         end_date = datetime.now(pytz.UTC)
         start_date = end_date - timedelta(minutes=minutes)
-        
+
         logger.info(f"Analyzing logs from {start_date} to {end_date} in bucket '{bucket_name}'...")
-        
+
         base_paths = ["illumio/summaries/", "illumio/auditable_events/"]
-        
+
         all_log_files = []
         total_size = 0
 
         for base_path in base_paths:
             log_files = []
             logger.info(f"\nScanning folder: {base_path}")
-            
+
             prefixes = [f"{base_path}{(start_date + timedelta(days=i)).strftime('%Y%m%d')}" 
                         for i in range((end_date - start_date).days + 1)]
-            
+
             for prefix in prefixes:
                 paginator = s3.get_paginator('list_objects_v2')
                 for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
@@ -85,11 +100,11 @@ def list_recent_logs(bucket_name, minutes=30, max_files_per_folder=5):
                         break
                 if len(log_files) >= max_files_per_folder:
                     break
-            
+
             log_files.sort(key=lambda x: x['LastModified'], reverse=True)
             log_files = log_files[:max_files_per_folder]
             all_log_files.extend(log_files)
-            
+
             logger.info(f"Found {len(log_files)} log files in {base_path}")
 
         logger.info(f"\nTotal log files found: {len(all_log_files)}")
@@ -100,20 +115,20 @@ def list_recent_logs(bucket_name, minutes=30, max_files_per_folder=5):
         for log in tqdm(all_log_files, desc="Processing logs", unit="file"):
             with tempfile.NamedTemporaryFile(delete=False) as temp_file:
                 temp_filename = temp_file.name
-            
+
             try:
                 s3.download_file(bucket_name, log['Key'], temp_filename)
-                
+
                 with gzip.open(temp_filename, 'rb') as f:
                     f.seek(0, 2)
                     uncompressed_size = f.tell()
-                
+
                 total_uncompressed_size += uncompressed_size
-                
+
                 # Extract the relative path from the S3 key
                 relative_path = os.path.dirname(log['Key'])
                 filename = os.path.basename(log['Key']).replace('.gz', '')
-                
+
                 # Remove the 'illumio/' prefix from the relative path if it exists
                 if relative_path.startswith('illumio/'):
                     relative_path = relative_path[len('illumio/'):]
@@ -122,18 +137,18 @@ def list_recent_logs(bucket_name, minutes=30, max_files_per_folder=5):
                 dest_folder = os.path.join(DOWNLOADED_FILES_FOLDER, relative_path)
                 os.makedirs(dest_folder, exist_ok=True)
                 dest_path = os.path.join(dest_folder, filename)
-                
+
                 # Decompress and save the file
                 with gzip.open(temp_filename, 'rb') as f_in:
                     with open(dest_path, 'wb') as f_out:
                         f_out.write(f_in.read())
-                
+
                 logger.info(f"\n- {log['Key']}")
                 logger.info(f"  Last modified: {log['LastModified']}")
                 logger.info(f"  Compressed size: {log['Size']} bytes")
                 logger.info(f"  Uncompressed size: {uncompressed_size} bytes")
                 logger.info(f"  Saved to: {dest_path}")
-            
+
             except ClientError as e:
                 logger.error(f"\nError downloading {log['Key']}: {e}")
             except gzip.BadGzipFile:
@@ -163,12 +178,12 @@ def list_recent_logs(bucket_name, minutes=30, max_files_per_folder=5):
 def main():
     logger.info("Starting S3 download process")
     if not S3_BUCKET_NAME:
-        logger.error("Error: S3_BUCKET_NAME is not set in .env file.")
-        logger.error("Please set it in the .env file")
+        logger.error("Error: S3_BUCKET_NAME is not set in environment variables (.env file).")
+        logger.error("Please set it in the .env file.")
         sys.exit(1)
 
     # Ensure the LOG_FOLDER exists
-    os.makedirs(LOG_FOLDER, exist_ok=True)
+    LOG_FOLDER.mkdir(parents=True, exist_ok=True)
     logger.debug(f"Ensured LOG_FOLDER exists: {LOG_FOLDER}")
 
     # Ensure the DOWNLOADED_FILES_FOLDER exists

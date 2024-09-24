@@ -1,5 +1,4 @@
 # Python 3.12.6
-configparser
 python-dotenv
 boto3
 pytz
