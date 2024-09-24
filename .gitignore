@@ -1,18 +1,34 @@
 # Ignore MacOS system files
 .DS_Store
 
-# Ignore the cursorignore file
+# Ignore editor-specific files
 .cursorignore
+*.swp
+*.swo
+*.swn
 
 # Ignore the environment (and virtual environment) directories
 .venv/
 .env
 
-# Ignore log files
+# Ignore log files and directories
 *.log
-downloaded_logs/**
+logs/
+illumio/
 
 # Python bytecode files
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Ignore backup and temporary files
+*.bak
+*.tmp
+*.orig
+
+# Ignore Docker-specific files (optional, depending on your workflow)
+Dockerfile
+docker-compose.yml
+
+# Ignore version control
+.git
