@@ -8,6 +8,8 @@ import configparser
 from pathlib import Path
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
+import gzip
+import io
 
 # Get the directory where the script is located
 script_dir = Path(__file__).parent
@@ -34,13 +36,17 @@ config.read(settings_file)
 MINUTES = config.getint('S3', 'MINUTES', fallback=30)
 MAX_FILES_PER_FOLDER = config.getint('S3', 'MAX_FILES_PER_FOLDER', fallback=5)
 
-def list_s3_contents(bucket_name, minutes=30, max_files_per_folder=5):
+# New configurable option
+# Set this to 0 to disable log extraction, or to a positive integer to extract that many log lines from each .gz file
+EXTRACT_LOG_LINES = 1  # Change this value to extract log lines (e.g., set to 1 to extract the first line of each log)
+
+def list_s3_contents(bucket_name, minutes=30, max_files_per_folder=5, extract_lines=0):
     """
     List the folders and .gz filenames in the S3 bucket from the last 'minutes',
     limited to a maximum of 'max_files_per_folder' files per folder.
+    Optionally extract and display the first 'extract_lines' lines from each .gz file.
     """
     try:
-        # Create a session with explicit AWS credentials
         session = boto3.Session(
             aws_access_key_id=AWS_ACCESS_KEY_ID,
             aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
@@ -70,7 +76,22 @@ def list_s3_contents(bucket_name, minutes=30, max_files_per_folder=5):
                             if obj['Key'].endswith('.gz'):
                                 last_modified = obj['LastModified'].replace(tzinfo=pytz.UTC)
                                 if start_date <= last_modified <= end_date:
-                                    print(f"    {os.path.basename(obj['Key'])}")
+                                    filename = os.path.basename(obj['Key'])
+                                    print(f"    {filename}")
+                                    
+                                    if extract_lines > 0:
+                                        try:
+                                            response = s3.get_object(Bucket=bucket_name, Key=obj['Key'])
+                                            with gzip.GzipFile(fileobj=io.BytesIO(response['Body'].read())) as gzipfile:
+                                                print(f"      Log contents (first {extract_lines} line(s)):")
+                                                for i, line in enumerate(gzipfile):
+                                                    if i < extract_lines:
+                                                        print(f"        {line.decode('utf-8').strip()}")
+                                                    else:
+                                                        break
+                                        except Exception as e:
+                                            print(f"      Error extracting log contents: {e}")
+                                    
                                     file_count += 1
                                     if file_count >= max_files_per_folder:
                                         break
@@ -100,7 +121,7 @@ def main():
         print("AWS credentials are not set in environment variables (.env file). Please set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.")
         sys.exit(1)
 
-    list_s3_contents(S3_BUCKET_NAME, minutes=MINUTES, max_files_per_folder=MAX_FILES_PER_FOLDER)
+    list_s3_contents(S3_BUCKET_NAME, minutes=MINUTES, max_files_per_folder=MAX_FILES_PER_FOLDER, extract_lines=EXTRACT_LOG_LINES)
     print("S3 listing process completed")
 
 if __name__ == "__main__":
