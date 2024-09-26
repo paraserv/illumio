@@ -1,23 +1,47 @@
-# app/s3_manager.py
+#!/usr/bin/env python3
+"""
+Manages interactions with AWS S3, including fetching and downloading log files.
+"""
 
-import boto3
+# Standard library imports
 import gzip
 import shutil
 import os
-import time  # Added import for time
-import json  # Added import for json
-from pathlib import Path  # Ensure Path is imported
-from logger_config import get_logger
-from datetime import datetime, timedelta
-import pytz
-from configparser import ConfigParser
-from botocore.config import Config as BotoConfig
+import time
+import json
 import threading
+from datetime import datetime, timedelta
+from pathlib import Path
+import configparser
+
+# Third-party imports
+import boto3
+import pytz
+from botocore.config import Config as BotoConfig
+
+# Local application imports
+from logger_config import get_logger
+
+# Typing imports
+from typing import List, Dict, Any
 
 logger = get_logger(__name__)
 
 class S3Manager:
-    def __init__(self, aws_access_key_id, aws_secret_access_key, bucket_name, log_timeframe, base_paths, enable_dynamic_timeframe, health_reporter, max_pool_connections, boto_config=None, state_file=None, checkpoint_file=None):
+    def __init__(
+        self,
+        aws_access_key_id,
+        aws_secret_access_key,
+        bucket_name,
+        log_timeframe,
+        base_paths,
+        enable_dynamic_timeframe,
+        health_reporter,
+        max_pool_connections,
+        boto_config=None,
+        state_file=None,
+        checkpoint_file=None
+    ):
         self.session = boto3.Session(
             aws_access_key_id=aws_access_key_id,
             aws_secret_access_key=aws_secret_access_key
@@ -40,9 +64,11 @@ class S3Manager:
         self.total_log_entries = 0
 
         # Load settings
-        config = ConfigParser()
-        config.read('settings.ini')
-        
+        config = configparser.ConfigParser()
+        script_dir = Path(__file__).parent
+        settings_file = script_dir / 'settings.ini'
+        config.read(settings_file)
+
         self.baseline_period = config.getfloat('S3', 'BASELINE_PERIOD', fallback=300.0)
         self.MIN_TIMEFRAME = config.getfloat('Processing', 'MIN_TIMEFRAME', fallback=0.25)
         self.MAX_TIMEFRAME = config.getfloat('Processing', 'MAX_TIMEFRAME', fallback=24.0)

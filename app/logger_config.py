@@ -1,8 +1,10 @@
-# app/logger_config.py
+#!/usr/bin/env python3
+"""
+Logger configuration for the application.
+"""
 
 import logging
 from logging.handlers import RotatingFileHandler
-import os
 from pathlib import Path
 import configparser
 

@@ -1,7 +1,18 @@
+#!/usr/bin/env python3
+"""
+Configuration loader for the application.
+"""
+
+# Standard library imports
 import os
 from pathlib import Path
-from dotenv import load_dotenv
 import configparser
+
+# Third-party imports
+from dotenv import load_dotenv
+
+# Typing imports
+from typing import List
 
 class Config:
     def __init__(self):

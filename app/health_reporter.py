@@ -1,9 +1,20 @@
+#!/usr/bin/env python3
+"""
+HealthReporter module for monitoring application health and logging statistics.
+"""
+
+# Standard library imports
 import time
 import threading
 from datetime import datetime, timedelta
-from logger_config import get_logger
 from pathlib import Path
 import configparser
+
+# Local application imports
+from logger_config import get_logger
+
+# Typing imports
+from typing import Optional
 
 logger = get_logger(__name__)
 
@@ -18,6 +29,7 @@ class HealthReporter:
         self.logs_extracted = {'summaries': 0, 'auditable_events': 0}
         self.syslog_messages_sent = {'summaries': 0, 'auditable_events': 0}
         self.errors_count = {'summaries': 0, 'auditable_events': 0, 'general': 0}
+        self.dropped_logs = {'summaries': 0, 'auditable_events': 0}
         self.running = False
         self.lock = threading.Lock()
         self.last_s3_ingestion_rate = 0.0
@@ -85,12 +97,14 @@ class HealthReporter:
             f"Summary Logs: GZ Files Processed: {self.gz_files_processed['summaries']}, "
             f"Logs Extracted: {self.logs_extracted['summaries']}, "
             f"Syslog Messages Sent: {self.syslog_messages_sent['summaries']}, "
+            f"Dropped Logs: {self.dropped_logs['summaries']}, "
             f"Errors: {self.errors_count['summaries']}"
         )
         audit_stats = (
             f"Audit Logs: GZ Files Processed: {self.gz_files_processed['auditable_events']}, "
             f"Logs Extracted: {self.logs_extracted['auditable_events']}, "
             f"Syslog Messages Sent: {self.syslog_messages_sent['auditable_events']}, "
+            f"Dropped Logs: {self.dropped_logs['auditable_events']}, "
             f"Errors: {self.errors_count['auditable_events']}"
         )
         self.log_info(summary_stats)
@@ -122,6 +136,10 @@ class HealthReporter:
                 log_type = 'general'
             self.errors_count[log_type] += 1
             self.log_error(f"Error ({log_type}): {error_message}")
+
+    def report_dropped_log(self, log_type):
+        with self.lock:
+            self.dropped_logs[log_type] += 1
 
     def log_info(self, message):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

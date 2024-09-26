@@ -1,15 +1,22 @@
-# s3_analyzer.py
+#!/usr/bin/env python3
+"""
+Script to analyze S3 contents related to Illumio logs.
+"""
+
+# Standard library imports
 import os
 import sys
 from datetime import datetime, timedelta
-import pytz
-from dotenv import load_dotenv
-import configparser
 from pathlib import Path
-import boto3
-from botocore.exceptions import ClientError, NoCredentialsError
 import gzip
 import io
+import configparser
+
+# Third-party imports
+import pytz
+import boto3
+from botocore.exceptions import ClientError, NoCredentialsError
+from dotenv import load_dotenv
 
 # Get the directory where the script is located
 script_dir = Path(__file__).parent
@@ -97,8 +104,6 @@ def list_s3_contents(bucket_name, minutes=30, max_files_per_folder=5, extract_li
                                         break
                     if file_count >= max_files_per_folder:
                         break
-                if file_count >= max_files_per_folder:
-                    break
 
     except NoCredentialsError:
         print("Error: AWS credentials not found. Please configure your AWS credentials.")

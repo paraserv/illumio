@@ -1,28 +1,30 @@
+# Ignore Python cache files
 __pycache__/
 *.py[cod]
 *$py.class
 
+# Ignore environment files and virtual environments
 .env
 .venv/
 
+# Ignore version control directories and files
 .git
 .gitignore
 
+# Ignore system files
 .DS_Store
 
-.cursorignore
-
+# Ignore logs and temporary files
 *.log
 logs/
-
-illumio/
-
-Dockerfile
-docker-compose.yml
-
-*.swp
-*.swo
-*.swn
 *.bak
 *.tmp
 *.orig
+
+# Ignore editor backups and swaps
+*.swp
+*.swo
+*.swn
+
+# Ignore other unnecessary files
+.cursorignore

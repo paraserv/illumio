@@ -1,23 +1,42 @@
-# app/log_processor.py
+#!/usr/bin/env python3
+"""
+Processes logs and sends them to the SIEM via syslog.
+"""
 
+# Standard library imports
 import json
 import os
-import logging
-import socket
 import time
 import math
-import configparser
-from pathlib import Path
-from typing import Dict, Any, List, Tuple
 import threading
+from pathlib import Path
+import configparser
+
+# Third-party imports
+import socket
+
+# Local application imports
 from logger_config import get_logger
 from health_reporter import HealthReporter
 
-# Get the logger for this module
+# Typing imports
+from typing import Dict, Any, List, Tuple
+
 logger = get_logger(__name__)
 
 class LogProcessor:
-    def __init__(self, sma_host, sma_port, max_messages_per_second, min_messages_per_second, enable_dynamic_syslog_rate, beatname, use_tcp, max_message_length, health_reporter: HealthReporter):
+    def __init__(
+        self,
+        sma_host,
+        sma_port,
+        max_messages_per_second,
+        min_messages_per_second,
+        enable_dynamic_syslog_rate,
+        beatname,
+        use_tcp,
+        max_message_length,
+        health_reporter: HealthReporter
+    ):
         # Load settings
         config = configparser.ConfigParser()
         config.read('settings.ini')
@@ -42,6 +61,7 @@ class LogProcessor:
         self.app_logger = get_logger(__name__)
         self.last_log_time = time.time()
         self.log_interval = 60  # Log at most once per minute
+        self.dropped_logs = {'summaries': 0, 'auditable_events': 0}
 
     def _setup_syslog(self):
         try:
@@ -54,7 +74,12 @@ class LogProcessor:
             logger.error(f"Error setting up syslog connection: {e}")
             return None
 
-    def process_log_file(self, file_path: Path, log_type: str, stop_event: threading.Event) -> Tuple[bool, int]:
+    def process_log_file(
+        self,
+        file_path: Path,
+        log_type: str,
+        stop_event: threading.Event
+    ) -> Tuple[bool, int]:
         try:
             self.app_logger.info(f"Processing file: {file_path}, Type: {log_type}")
             
@@ -75,7 +100,8 @@ class LogProcessor:
                     except Exception as e:
                         logger.error(f"Error processing log entry: {e}")
                         self.health_reporter.report_error(f"Error processing log entry: {e}", log_type)
-
+                        self.dropped_logs[log_type] += 1
+        
             self.app_logger.info(f"Extracted {len(logs_to_send)} logs from {file_path}")
             self.send_logs(logs_to_send, log_type, stop_event)
             

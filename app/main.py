@@ -1,24 +1,29 @@
-# app/main.py
+#!/usr/bin/env python3
+"""
+Main entry point for processing Illumio S3 logs and sending them to the SIEM.
+"""
 
+# Standard library imports
 import os
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
-from dotenv import load_dotenv
-import configparser
 import json
 import time
-from datetime import datetime, timedelta
 import signal
-from tenacity import retry, stop_after_attempt, wait_exponential
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from datetime import datetime, timedelta
+
+# Third-party imports
+from dotenv import load_dotenv
+from tenacity import retry, stop_after_attempt, wait_exponential
 import psutil
+import pytz
 from botocore.exceptions import ClientError
 from botocore.config import Config as BotoCoreConfig
-import concurrent.futures
-import pytz
 
+# Local application imports
 from s3_manager import S3Manager
 from log_processor import LogProcessor
 from logger_config import setup_logging, get_logger
@@ -44,10 +49,12 @@ log_processor = None  # Declare log_processor globally
 health_reporter = None  # Declare health_reporter globally
 
 def signal_handler(signum, frame):
-    logger.info("Received termination signal. Cleaning up...")
-    if health_reporter:
-        health_reporter.log_termination_signal_received()
-    stop_event.set()  # Signal to stop
+    logger.info("Received termination signal. Finishing current tasks...")
+    stop_event.set()
+    # Wait for a short period to allow current processing to complete
+    time.sleep(5)
+    shutdown(processed_keys, already_processed_files)
+    sys.exit(0)
 
 def shutdown(processed_keys, already_processed_files):
     global executor, state_file, checkpoint_file, log_processor, health_reporter
