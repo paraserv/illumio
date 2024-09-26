@@ -17,6 +17,7 @@ import psutil
 from botocore.exceptions import ClientError
 from botocore.config import Config as BotoCoreConfig
 import concurrent.futures
+import pytz
 
 from s3_manager import S3Manager
 from log_processor import LogProcessor
@@ -31,70 +32,111 @@ setup_logging()
 logger = get_logger('illumio_s3_processor')
 
 # Global variables
-running = True
 executor = None
-processed_keys = {}
+processed_keys = {'summaries': {}, 'auditable_events': {}}
 state_file = None
 config = None
 BATCH_SIZE = None
-new_objects = []
+checkpoint_file = None
 already_processed_files = set()
-
-def force_exit(signum, frame):
-    logger.info("Forced exit. Terminating immediately.")
-    os._exit(1)
-
-def shutdown(processed_keys, already_processed_files):
-    global running, executor, state_file, checkpoint_file
-    logger.info("Initiating shutdown...")
-    running = False
-    if executor:
-        logger.info("Shutting down ThreadPoolExecutor...")
-        executor.shutdown(wait=True)
-    if processed_keys is not None and state_file is not None:
-        save_state(processed_keys, state_file)
-    if already_processed_files is not None and checkpoint_file is not None:
-        save_checkpoint(already_processed_files, checkpoint_file)
-    logger.info("Shutdown complete.")
-    sys.exit(0)
+stop_event = threading.Event()
+log_processor = None  # Declare log_processor globally
+health_reporter = None  # Declare health_reporter globally
 
 def signal_handler(signum, frame):
-    global already_processed_files
     logger.info("Received termination signal. Cleaning up...")
-    threading.Thread(target=shutdown, args=(processed_keys, already_processed_files)).start()
-    signal.signal(signal.SIGALRM, force_exit)
-    signal.alarm(10)
+    if health_reporter:
+        health_reporter.log_termination_signal_received()
+    stop_event.set()  # Signal to stop
+
+def shutdown(processed_keys, already_processed_files):
+    global executor, state_file, checkpoint_file, log_processor, health_reporter
+    logger.info("Initiating shutdown...")
+
+    try:
+        if executor:
+            logger.info("Shutting down ThreadPoolExecutor...")
+            executor.shutdown(wait=False, cancel_futures=True)
+            logger.info("ThreadPoolExecutor shutdown initiated.")
+
+        if log_processor:
+            logger.info("Closing syslog connection...")
+            log_processor.close()
+            logger.info("Syslog connection closed.")
+
+        # Initialize counts
+        summaries_state_count = len(processed_keys['summaries'])
+        auditable_events_state_count = len(processed_keys['auditable_events'])
+        summaries_checkpoint_count = len([f for f in already_processed_files if 'summaries' in f])
+        auditable_events_checkpoint_count = len([f for f in already_processed_files if 'auditable_events' in f])
+
+        # Update counts in health_reporter
+        if health_reporter:
+            health_reporter.state_summaries_count = summaries_state_count
+            health_reporter.state_auditable_events_count = auditable_events_state_count
+            health_reporter.checkpoint_summaries_count = summaries_checkpoint_count
+            health_reporter.checkpoint_auditable_events_count = auditable_events_checkpoint_count
+
+            # Now stop the health_reporter
+            if health_reporter.running:
+                health_reporter.stop()
+
+        logger.info("Shutdown complete.")
+    except Exception as e:
+        logger.error(f"Exception during shutdown: {e}")
 
 def save_state(processed_keys, state_file):
     state_data = {
         'summaries': {},
         'auditable_events': {}
     }
-    for key, timestamp in processed_keys.items():
-        log_type = 'auditable_events' if 'auditable_events' in key else 'summaries'
-        state_data[log_type][key] = timestamp.isoformat()
-    
+    for log_type in ['summaries', 'auditable_events']:
+        for key, timestamp in processed_keys[log_type].items():
+            state_data[log_type][key] = timestamp.isoformat()
+
     with open(state_file, 'w') as f:
         json.dump(state_data, f)
-    logger.info(f"Saved state: Summaries: {len(state_data['summaries'])}, Auditable Events: {len(state_data['auditable_events'])}")
+    summaries_count = len(state_data['summaries'])
+    auditable_events_count = len(state_data['auditable_events'])
+    logger.info(f"Saved state: Summaries: {summaries_count}, Auditable Events: {auditable_events_count}")
+    # Removed the call to health_reporter.log_saved_state() with arguments
+    # if health_reporter:
+    #     health_reporter.log_saved_state(summaries_count, auditable_events_count)
+
+def save_checkpoint(already_processed_files, checkpoint_file):
+    checkpoint_data = {
+        'summaries': [f for f in already_processed_files if 'summaries' in f],
+        'auditable_events': [f for f in already_processed_files if 'auditable_events' in f]
+    }
+    with open(checkpoint_file, 'w') as f:
+        json.dump(checkpoint_data, f)
+    summaries_count = len(checkpoint_data['summaries'])
+    auditable_events_count = len(checkpoint_data['auditable_events'])
+    logger.info(f"Saved checkpoint: {summaries_count} summary files, {auditable_events_count} auditable event files")
+    # Removed the call to health_reporter.log_saved_checkpoint() with arguments
+    # if health_reporter:
+    #     health_reporter.log_saved_checkpoint(summaries_count, auditable_events_count)
 
 def load_state(state_file):
-    if os.path.exists(state_file):
+    processed_keys = {'summaries': {}, 'auditable_events': {}}
+    if state_file.exists():
         with open(state_file, 'r') as f:
             state_data = json.load(f)
-        processed_keys = {}
         for log_type in ['summaries', 'auditable_events']:
             for k, v in state_data.get(log_type, {}).items():
                 try:
-                    processed_keys[k] = datetime.fromisoformat(v)
+                    processed_keys[log_type][k] = datetime.fromisoformat(v)
                 except (TypeError, ValueError):
                     logger.warning(f"Invalid datetime format for key {k}: {v}. Skipping this entry.")
-        logger.info(f"Loaded state: Summaries: {len(state_data.get('summaries', {}))}, Auditable Events: {len(state_data.get('auditable_events', {}))}")
-        return processed_keys
-    return {}
+        summaries_count = len(processed_keys['summaries'])
+        auditable_events_count = len(processed_keys['auditable_events'])
+        logger.info(f"Loaded state: Summaries: {summaries_count}, Auditable Events: {auditable_events_count}")
+    else:
+        logger.info("No state file found. Starting from scratch.")
+    return processed_keys
 
 def load_checkpoint(checkpoint_file):
-    if os.path.exists(checkpoint_file):
+    if checkpoint_file.exists():
         with open(checkpoint_file, 'r') as f:
             checkpoint_data = json.load(f)
         summary_files = set(checkpoint_data.get('summaries', []))
@@ -103,15 +145,6 @@ def load_checkpoint(checkpoint_file):
         return summary_files.union(auditable_files)
     logger.info("No checkpoint file found.")
     return set()
-
-def save_checkpoint(processed_files, checkpoint_file):
-    checkpoint_data = {
-        'summaries': [f for f in processed_files if 'summaries' in f],
-        'auditable_events': [f for f in processed_files if 'auditable_events' in f]
-    }
-    with open(checkpoint_file, 'w') as f:
-        json.dump(checkpoint_data, f)
-    logger.info(f"Saved checkpoint: {len(checkpoint_data['summaries'])} summary files, {len(checkpoint_data['auditable_events'])} auditable event files")
 
 def get_files_for_batch(batch_id):
     global new_objects, BATCH_SIZE
@@ -142,32 +175,93 @@ def recover_from_unexpected_stop(downloaded_files_folder, checkpoint_file, state
 
     return already_processed_files
 
+def read_state_file(state_file):
+    if state_file.exists():
+        with open(state_file, 'r') as f:
+            state_data = json.load(f)
+        summaries_count = len(state_data.get('summaries', {}))
+        auditable_events_count = len(state_data.get('auditable_events', {}))
+        return summaries_count, auditable_events_count
+    else:
+        return 0, 0
+
+def read_checkpoint_file(checkpoint_file):
+    if checkpoint_file.exists():
+        with open(checkpoint_file, 'r') as f:
+            checkpoint_data = json.load(f)
+        summaries_count = len(checkpoint_data.get('summaries', []))
+        auditable_events_count = len(checkpoint_data.get('auditable_events', []))
+        return summaries_count, auditable_events_count
+    else:
+        return 0, 0
+
 def main():
-    global running, executor, processed_keys, state_file, config, new_objects, BATCH_SIZE, checkpoint_file, already_processed_files
+    global executor, processed_keys, state_file, config, BATCH_SIZE, checkpoint_file, already_processed_files, log_processor, health_reporter
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+    health_reporter = None  # Initialize health_reporter
     try:
         config = Config()
-        
+
+        # Initialize state_file and checkpoint_file paths only once
+        state_file = config.BASE_FOLDER / config.STATE_FILE
+        checkpoint_file = config.BASE_FOLDER / config.CHECKPOINT_FILE
+
+        # Initialize HealthReporter
+        health_reporter = HealthReporter(config.HEARTBEAT_INTERVAL, config.SUMMARY_INTERVAL)
+        health_reporter.start()
+
+        # Read counts from state.json and checkpoint.json
+        state_summaries_count, state_auditable_events_count = read_state_file(state_file)
+        checkpoint_summaries_count, checkpoint_auditable_events_count = read_checkpoint_file(checkpoint_file)
+
+        # Log recovered state to health report
+        health_reporter.log_recovered_state(
+            state_summaries_count, state_auditable_events_count,
+            checkpoint_summaries_count, checkpoint_auditable_events_count
+        )
+
+        # Initialize LogProcessor
+        log_processor = LogProcessor(
+            config.SMA_HOST,
+            config.SMA_PORT,
+            config.MAX_MESSAGES_PER_SECOND,
+            config.MIN_MESSAGES_PER_SECOND,
+            config.ENABLE_DYNAMIC_SYSLOG_RATE,
+            config.BEATNAME,
+            config.USE_TCP,
+            config.MAX_MESSAGE_LENGTH,
+            health_reporter
+        )
+
         executor = ThreadPoolExecutor(max_workers=config.MAX_WORKERS)
 
         if not config.AWS_ACCESS_KEY_ID or not config.AWS_SECRET_ACCESS_KEY or not config.S3_BUCKET_NAME:
             logger.error("AWS credentials or S3 bucket name are not set.")
             sys.exit(1)
 
+        # Ensure directories exist
         config.DOWNLOADED_FILES_FOLDER.mkdir(parents=True, exist_ok=True)
         config.LOG_FOLDER.mkdir(parents=True, exist_ok=True)
 
-        script_dir = Path(__file__).parent
-        state_file = script_dir / config.STATE_FILE
-        checkpoint_file = script_dir / 'checkpoint.json'
+        # Initialize processed_keys for both summaries and auditable_events
+        processed_keys = {'summaries': {}, 'auditable_events': {}}
+        already_processed_files = set()
 
-        health_reporter = HealthReporter(
-            heartbeat_interval=60.0,
-            summary_interval=3600.0
-        )
-        health_reporter.start()
+        # Explicitly create state and checkpoint files if they don't exist
+        if not state_file.exists():
+            save_state(processed_keys, state_file)  # Pass initialized processed_keys
+            logger.info(f"Created new state file: {state_file}")
+        if not checkpoint_file.exists():
+            save_checkpoint(already_processed_files, checkpoint_file)
+            logger.info(f"Created new checkpoint file: {checkpoint_file}")
+
+        # Load state from the state file
+        processed_keys = load_state(state_file)
+
+        # Load checkpoint from the checkpoint file
+        already_processed_files = load_checkpoint(checkpoint_file)
 
         boto_config = BotoCoreConfig(
             max_pool_connections=config.MAX_POOL_CONNECTIONS,
@@ -188,30 +282,7 @@ def main():
             checkpoint_file=checkpoint_file
         )
 
-        log_processor = LogProcessor(
-            sma_host=config.SMA_HOST,
-            sma_port=config.SMA_PORT,
-            min_messages_per_second=config.MIN_MESSAGES_PER_SECOND,
-            max_messages_per_second=config.MAX_MESSAGES_PER_SECOND,
-            enable_dynamic_syslog_rate=config.ENABLE_DYNAMIC_SYSLOG_RATE,
-            beatname=config.BEATNAME,
-            use_tcp=config.USE_TCP,
-            max_message_length=config.MAX_MESSAGE_LENGTH,
-            health_reporter=health_reporter
-        )
-
         processed_keys_lock = threading.Lock()
-
-        # Explicitly create state and checkpoint files if they don't exist
-        if not state_file.exists():
-            save_state({}, state_file)
-            logger.info(f"Created new state file: {state_file}")
-        if not checkpoint_file.exists():
-            save_checkpoint(set(), checkpoint_file)
-            logger.info(f"Created new checkpoint file: {checkpoint_file}")
-
-        processed_keys = load_state(state_file)
-        already_processed_files = load_checkpoint(checkpoint_file)
 
         ADJUSTMENT_INTERVAL = 60  # seconds
         last_adjustment_time = time.time()
@@ -219,7 +290,7 @@ def main():
         baseline_period = 300  # 5 minutes
         baseline_start_time = time.time()
 
-        while running:
+        while not stop_event.is_set():
             try:
                 current_time = time.time()
                 if current_time - baseline_start_time < baseline_period:
@@ -229,114 +300,147 @@ def main():
                         logger.info("Baseline period ended. Starting normal operation with adjustments.")
                         globals()['baseline_ended'] = True
 
-                logger.info("Checking for new logs...")
-                try:
-                    new_objects = s3_manager.get_new_log_objects(processed_keys)
-                    logger.info(f"Found {len(new_objects)} new log files out of {len(processed_keys)} processed keys")
-                except Exception as e:
-                    logger.error(f"Error fetching new log objects: {e}")
-                    continue
+                start_time = time.time()
+                total_processed = 0
 
-                if new_objects:
-                    logger.info(f"Processing {len(new_objects)} new log files.")
-                    start_time = time.time()
-                    processed_count = {'summaries': 0, 'auditable_events': 0}
-                    
-                    futures = []
+                # Before starting new tasks
+                if stop_event.is_set():
+                    break
 
-                    for s3_object in new_objects:
-                        log_type = 'auditable_events' if 'auditable_events' in s3_object['Key'] else 'summaries'
-                        if s3_object['Key'] not in already_processed_files:
+                # Process log types
+                for log_type in ['auditable_events', 'summaries']:
+                    logger.info(f"Checking for new {log_type} logs...")
+                    new_objects = s3_manager.get_new_s3_objects(
+                        log_type,
+                        processed_keys,
+                        datetime.now(pytz.UTC) - timedelta(hours=config.TIME_WINDOW_HOURS),
+                        datetime.now(pytz.UTC),
+                        config.BATCH_SIZE
+                    )
+
+                    if new_objects:
+                        logger.info(f"Found {len(new_objects)} new {log_type} log files.")
+                        processed_count = 0
+                        futures = []
+
+                        for s3_object in new_objects:
+                            if stop_event.is_set():
+                                break  # Exit if stop_event is set
                             future = executor.submit(
                                 handle_log_file_with_retry,
                                 s3_object, s3_manager, log_processor, config.DOWNLOADED_FILES_FOLDER,
-                                processed_keys, processed_keys_lock, health_reporter, log_type
+                                processed_keys, processed_keys_lock, health_reporter, log_type, already_processed_files, stop_event
                             )
                             futures.append((future, s3_object, log_type))
 
-                    for future, s3_object, log_type in futures:
-                        try:
-                            result = future.result()
-                            if result:
-                                already_processed_files.add(s3_object['Key'])
-                                processed_count[log_type] += 1
-                                logger.info(f"Successfully processed: {s3_object['Key']}, Type: {log_type}")
-                            else:
-                                logger.error(f"Failed to process: {s3_object['Key']}, Type: {log_type}")
-                        except Exception as e:
-                            logger.error(f"Error processing {s3_object['Key']}: {str(e)}")
-                            health_reporter.report_error(f"Error processing {s3_object['Key']}: {str(e)}", log_type)
+                        # Wait for all futures to complete or stop if stop_event is set
+                        for future, s3_object, log_type in futures:
+                            if stop_event.is_set():
+                                break
+                            try:
+                                result = future.result()
+                                if result:
+                                    with processed_keys_lock:
+                                        processed_keys[log_type][s3_object['Key']] = datetime.now(pytz.UTC)
+                                    processed_count += 1
+                                    logger.info(f"Successfully processed: {s3_object['Key']}, Type: {log_type}")
+                                    # Add the processed file to the already_processed_files set
+                                    with processed_keys_lock:
+                                        already_processed_files.add(s3_object['Key'])
+                                else:
+                                    logger.error(f"Failed to process: {s3_object['Key']}, Type: {log_type}")
+                            except Exception as e:
+                                logger.error(f"Error processing {s3_object['Key']}: {str(e)}")
+                                health_reporter.report_error(f"Error processing {s3_object['Key']}: {str(e)}", log_type)
 
-                    # Save checkpoint after processing batch
-                    s3_manager.save_checkpoint(already_processed_files)
+                        # Save state and checkpoint after processing each log type
+                        s3_manager.save_state(processed_keys)
+                        save_checkpoint(already_processed_files, checkpoint_file)
 
-                    processing_time = time.time() - start_time
-                    total_processed = sum(processed_count.values())
+                        logger.info(f"Processed {processed_count} {log_type} log files.")
+                        total_processed += processed_count
+                    else:
+                        logger.info(f"No new {log_type} logs found.")
+
+                processing_time = time.time() - start_time
+                if total_processed > 0 and processing_time > 0:
                     processing_rate = total_processed / processing_time * 3600  # logs per hour
-
-                    if current_time - baseline_start_time >= baseline_period:
-                        # Only perform adjustments after the baseline period
-                        if config.ENABLE_DYNAMIC_BATCH_SIZE:
-                            new_batch_size = adjust_batch_size(config.BATCH_SIZE, processing_time, config.MIN_BATCH_SIZE, config.MAX_BATCH_SIZE)
-                            if new_batch_size != config.BATCH_SIZE:
-                                message = f"Batch size adjusted: {config.BATCH_SIZE} -> {new_batch_size}"
-                                logger.info(message)
-                                health_reporter.log_adjustment(message)
-                                config.BATCH_SIZE = new_batch_size
-
-                        if config.ENABLE_DYNAMIC_WORKERS:
-                            new_max_workers = adjust_max_workers(executor._max_workers, config.MIN_WORKERS, config.MAX_WORKERS)
-                            if new_max_workers != executor._max_workers:
-                                message = f"Max workers adjusted: {executor._max_workers} -> {new_max_workers}"
-                                logger.info(message)
-                                health_reporter.log_adjustment(message)
-                                executor._max_workers = new_max_workers
-
-                        logger.info(f"Processed {total_processed} log files (Summaries: {processed_count['summaries']}, Auditable Events: {processed_count['auditable_events']}) at a rate of {processing_rate:.2f} logs/hour.")
-                        health_reporter.log_message(f"Processing rate: {processing_rate:.2f} logs/hour")
-                        
-                        last_adjustment_time = current_time
-
                 else:
-                    logger.info("No new log files found.")
+                    processing_rate = 0
 
-                if running:
-                    logger.info(f"Sleeping for {config.POLL_INTERVAL} seconds before next check...")
-                    time.sleep(config.POLL_INTERVAL)
+                if current_time - baseline_start_time >= baseline_period and total_processed > 0:
+                    # Only perform adjustments after the baseline period
+                    if config.ENABLE_DYNAMIC_BATCH_SIZE:
+                        new_batch_size = adjust_batch_size(config.BATCH_SIZE, processing_time, config.MIN_BATCH_SIZE, config.MAX_BATCH_SIZE)
+                        if new_batch_size != config.BATCH_SIZE:
+                            message = f"Batch size adjusted: {config.BATCH_SIZE} -> {new_batch_size}"
+                            logger.info(message)
+                            health_reporter.log_adjustment(message)
+                            config.BATCH_SIZE = new_batch_size
+
+                    if config.ENABLE_DYNAMIC_WORKERS:
+                        new_max_workers = adjust_max_workers(executor._max_workers, config.MIN_WORKERS, config.MAX_WORKERS)
+                        if new_max_workers != executor._max_workers:
+                            message = f"Max workers adjusted: {executor._max_workers} -> {new_max_workers}"
+                            logger.info(message)
+                            health_reporter.log_adjustment(message)
+                            executor._max_workers = new_max_workers
+
+                    logger.info(f"Processed {total_processed} log files at a rate of {processing_rate:.2f} logs/hour.")
+                    health_reporter.log_message(f"Processing rate: {processing_rate:.2f} logs/hour")
+                    
+                    last_adjustment_time = current_time
+
+                if stop_event.is_set():
+                    break
+
+                # Responsive sleep
+                sleep_time = config.POLL_INTERVAL
+                sleep_increment = 1  # Check every 1 second
+                while sleep_time > 0 and not stop_event.is_set():
+                    time.sleep(min(sleep_increment, sleep_time))
+                    sleep_time -= sleep_increment
 
                 cleanup_downloaded_files(config.DOWNLOADED_FILES_FOLDER)
 
-            except KeyboardInterrupt:
-                logger.info("Keyboard interrupt received. Initiating shutdown...")
-                running = False
+            except Exception as e:
+                logger.exception(f"Unhandled exception in main loop: {e}")
+                health_reporter.report_error(str(e), 'general')
+                stop_event.set()  # Exit the loop on exception
 
     except Exception as e:
         logger.exception(f"Unhandled exception in main: {e}")
-        health_reporter.report_error(str(e), 'general')
+        if health_reporter:
+            health_reporter.report_error(str(e), 'general')
     finally:
-        if 'health_reporter' in locals():
-            health_reporter.stop()
         shutdown(processed_keys, already_processed_files)
         logger.info("Script has been terminated.")
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-def handle_log_file_with_retry(s3_object, s3_manager, log_processor, downloaded_files_folder, processed_keys, processed_keys_lock, health_reporter, log_type):
+def handle_log_file_with_retry(s3_object, s3_manager, log_processor, downloaded_files_folder,
+                               processed_keys, processed_keys_lock, health_reporter, log_type,
+                               already_processed_files, stop_event):
     logger.info(f"Handling log file: {s3_object['Key']}, Type: {log_type}")
-    if s3_object['Key'] in processed_keys:
+    if s3_object['Key'] in processed_keys[log_type]:
         logger.info(f"Skipping already processed file: {s3_object['Key']}")
         return True
 
     try:
-        dest_path = s3_manager.download_and_extract(s3_object, downloaded_files_folder)
+        # Check stop_event before processing
+        if stop_event.is_set():
+            logger.info(f"Stopping processing of {s3_object['Key']} due to shutdown signal.")
+            return False
+
+        dest_path = s3_manager.download_and_extract(s3_object, downloaded_files_folder, stop_event)
         if dest_path:
             logger.info(f"Successfully downloaded and extracted: {dest_path}")
             health_reporter.report_gz_file_processed(log_type)
-            success, logs_count = log_processor.process_log_file(Path(dest_path), log_type)
+            success, logs_count = log_processor.process_log_file(dest_path, log_type, stop_event)
             if success:
-                Path(dest_path).unlink()
+                dest_path.unlink()
                 logger.info(f"Successfully processed and deleted: {dest_path}")
                 with processed_keys_lock:
-                    processed_keys[s3_object['Key']] = datetime.now()
+                    processed_keys[log_type][s3_object['Key']] = datetime.now(pytz.UTC)
+                    already_processed_files.add(s3_object['Key'])
                 logger.info(f"Added {s3_object['Key']} to processed keys")
                 health_reporter.report_logs_extracted(logs_count, log_type)
                 health_reporter.report_syslog_sent(logs_count, log_type)

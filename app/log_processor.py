@@ -9,6 +9,7 @@ import math
 import configparser
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
+import threading
 from logger_config import get_logger
 from health_reporter import HealthReporter
 
@@ -53,20 +54,30 @@ class LogProcessor:
             logger.error(f"Error setting up syslog connection: {e}")
             return None
 
-    def process_log_file(self, file_path: Path, log_type: str):
+    def process_log_file(self, file_path: Path, log_type: str, stop_event: threading.Event) -> Tuple[bool, int]:
         try:
             self.app_logger.info(f"Processing file: {file_path}, Type: {log_type}")
             
             logs_to_send = []
             with open(file_path, 'r') as f:
-                for line in f:
-                    log_entry = json.loads(line.strip())
-                    transformed_log = self.transform_log_based_on_policy(log_entry, log_type)
-                    logs_to_send.append((transformed_log, log_entry))
-                    self.health_reporter.report_logs_extracted(1, log_type)
+                logs = f.readlines()
+                total_logs = len(logs)
+                logger.info(f"Extracted {total_logs} logs from {file_path}")
+                for log_entry in logs:
+                    if stop_event.is_set():
+                        logger.info(f"Stopping log processing for {file_path} due to shutdown signal.")
+                        return False, 0
+                    try:
+                        log_entry = json.loads(log_entry.strip())
+                        transformed_log = self.transform_log_based_on_policy(log_entry, log_type)
+                        logs_to_send.append((transformed_log, log_entry))
+                        self.health_reporter.report_logs_extracted(1, log_type)
+                    except Exception as e:
+                        logger.error(f"Error processing log entry: {e}")
+                        self.health_reporter.report_error(f"Error processing log entry: {e}", log_type)
 
             self.app_logger.info(f"Extracted {len(logs_to_send)} logs from {file_path}")
-            self.send_logs(logs_to_send, log_type)
+            self.send_logs(logs_to_send, log_type, stop_event)
             
             self.app_logger.info(f"Log processing completed successfully for {file_path}")
             return True, len(logs_to_send)
@@ -203,7 +214,7 @@ class LogProcessor:
         
         return f"{formatted_log}|original_message={escaped_json}"
 
-    def send_logs(self, logs: List[Tuple[Dict[str, Any], Dict[str, Any]]], log_type: str):
+    def send_logs(self, logs: List[Tuple[Dict[str, Any], Dict[str, Any]]], log_type: str, stop_event: threading.Event):
         total_logs = len(logs)
         self.app_logger.info(f"Log Processor: Attempting to send {total_logs} logs to {self.sma_host}:{self.sma_port} via {'TCP' if self.USE_TCP else 'UDP'}")
         
@@ -214,6 +225,10 @@ class LogProcessor:
             start_time = time.time()
             last_baseline_log_time = start_time
             for index, (transformed_log, original_log) in enumerate(logs, 1):
+                if stop_event.is_set():
+                    self.app_logger.info(f"Stopping log sending due to shutdown signal.")
+                    break  # Exit the loop if stop_event is set
+
                 formatted_log = self.format_log_for_siem(transformed_log, original_log)
                 current_time = time.strftime("%b %d %Y %H:%M:%S", time.localtime())
                 syslog_ip = socket.gethostbyname(socket.gethostname())
@@ -317,3 +332,11 @@ class LogProcessor:
             self.health_reporter.log_message(message)
         
         self.last_adjustment_time = current_time
+
+    def close(self):
+        if self.syslog:
+            try:
+                self.syslog.close()
+                logger.info("Syslog socket closed.")
+            except Exception as e:
+                logger.error(f"Error closing syslog socket: {e}")

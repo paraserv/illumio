@@ -4,16 +4,15 @@ import boto3
 import gzip
 import shutil
 import os
-import tempfile
-from pathlib import Path
+import time  # Added import for time
+import json  # Added import for json
+from pathlib import Path  # Ensure Path is imported
 from logger_config import get_logger
 from datetime import datetime, timedelta
 import pytz
-from tenacity import retry, stop_after_attempt, wait_exponential
-import time
-import json
 from configparser import ConfigParser
 from botocore.config import Config as BotoConfig
+import threading
 
 logger = get_logger(__name__)
 
@@ -60,58 +59,74 @@ class S3Manager:
         self.state_file = state_file
         self.checkpoint_file = checkpoint_file
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-    def get_new_log_objects(self, processed_keys):
-        try:
-            start_time = datetime.now(pytz.UTC)
-            end_date = datetime.now(pytz.UTC)
-            start_date = end_date - timedelta(hours=self.log_timeframe)
-            
-            logger.info(f"Scanning for unprocessed logs from {start_date} to {end_date}")
+    def get_new_s3_objects(self, log_type, processed_keys, time_window_start, time_window_end, batch_size):
+        folder = f"illumio/{log_type}/"
+        new_objects = []
 
-            unprocessed_objects = {'summaries': [], 'auditable_events': []}
-            total_size = {'summaries': 0, 'auditable_events': 0}
+        if log_type == 'summaries':
+            # Use date-based prefixes for summaries
+            date_list = [time_window_start + timedelta(days=x) for x in range((time_window_end - time_window_start).days + 1)]
+            prefixes = [f"{folder}{date.strftime('%Y%m%d')}" for date in date_list]
+            logger.info(f"Scanning prefixes for summaries: {prefixes}")
+            try:
+                for prefix in prefixes:
+                    paginator = self.s3_client.get_paginator('list_objects_v2')
+                    page_iterator = paginator.paginate(
+                        Bucket=self.bucket_name,
+                        Prefix=prefix
+                    )
 
-            current_date = end_date.strftime('%Y%m%d')
-
-            for base_path in self.base_paths:
-                logger.info(f"Scanning folder: {base_path}")
-                
-                date_prefix = f"{base_path}{current_date}"
-                
+                    for page in page_iterator:
+                        if 'Contents' in page:
+                            for obj in page['Contents']:
+                                # Filter objects by time window and whether they have been processed
+                                obj_last_modified = obj['LastModified'].replace(tzinfo=pytz.UTC)
+                                if obj['Key'] not in processed_keys[log_type] and \
+                                   time_window_start <= obj_last_modified <= time_window_end:
+                                    new_objects.append(obj)
+                                    if len(new_objects) >= batch_size:
+                                        break
+                            if len(new_objects) >= batch_size:
+                                break
+            except Exception as e:
+                logger.error(f"Error listing objects for prefix {prefix}: {e}")
+                return []
+        else:
+            # Scan entire folder for auditable_events
+            logger.info(f"Scanning folder for auditable_events: {folder}")
+            try:
                 paginator = self.s3_client.get_paginator('list_objects_v2')
-                for page in paginator.paginate(Bucket=self.bucket_name, Prefix=date_prefix):
+                page_iterator = paginator.paginate(
+                    Bucket=self.bucket_name,
+                    Prefix=folder
+                )
+
+                for page in page_iterator:
                     if 'Contents' in page:
                         for obj in page['Contents']:
-                            log_type = 'auditable_events' if 'auditable_events' in obj['Key'] else 'summaries'
-                            
-                            if start_date <= obj['LastModified'] <= end_date:
-                                if obj['Key'] not in processed_keys:
-                                    unprocessed_objects[log_type].append(obj)
-                                    total_size[log_type] += obj['Size']
+                            # Filter by time window and processed keys
+                            obj_last_modified = obj['LastModified'].replace(tzinfo=pytz.UTC)
+                            if obj['Key'] not in processed_keys[log_type] and \
+                               time_window_start <= obj_last_modified <= time_window_end:
+                                new_objects.append(obj)
+                                if len(new_objects) >= batch_size:
+                                    break
+                        if len(new_objects) >= batch_size:
+                            break
+            except Exception as e:
+                logger.error(f"Error listing objects in folder {folder}: {e}")
+                return []
 
-            logger.info(f"Found {len(unprocessed_objects['summaries'])} summary logs and {len(unprocessed_objects['auditable_events'])} auditable event logs")
-            logger.info(f"Total size: Summaries: {total_size['summaries'] / (1024 * 1024):.2f} MB, Auditable Events: {total_size['auditable_events'] / (1024 * 1024):.2f} MB")
-            logger.info(f"Time range: {start_date} to {end_date}")
-
-            # Save state
-            self.save_state(processed_keys)
-
-            return unprocessed_objects['summaries'] + unprocessed_objects['auditable_events']
-        except Exception as e:
-            error_message = f"S3 Manager: Error scanning for unprocessed log objects: {e}"
-            self.app_logger.error(error_message)
-            self.health_reporter.report_error(error_message)
-            raise
+        return new_objects
 
     def save_state(self, processed_keys):
         state_data = {
             'summaries': {},
             'auditable_events': {}
         }
-        for key, timestamp in processed_keys.items():
-            log_type = 'auditable_events' if 'auditable_events' in key else 'summaries'
-            state_data[log_type][key] = timestamp.isoformat()
+        for log_type in ['summaries', 'auditable_events']:
+            for key, timestamp in processed_keys[log_type].items():
+                state_data[log_type][key] = timestamp.isoformat()
         
         with open(self.state_file, 'w') as f:
             json.dump(state_data, f)
@@ -161,31 +176,30 @@ class S3Manager:
             logger.warning(f"Unable to extract timestamp from filename: {filename}")
             return None
 
-    def download_and_extract(self, s3_object, download_folder):
+    def download_and_extract(self, s3_object, download_folder, stop_event: threading.Event):
         key = s3_object['Key']
-        relative_path = os.path.dirname(key)
-        filename = os.path.basename(key).replace('.gz', '')
 
-        # Remove the 'illumio/' prefix from the relative path if it exists
-        if relative_path.startswith('illumio/'):
-            relative_path = relative_path[len('illumio/'):]
-
-        # Create the destination path, preserving the folder structure
-        dest_folder = Path(download_folder) / relative_path
-        dest_folder.mkdir(parents=True, exist_ok=True)
-        dest_path = dest_folder / filename
+        if stop_event.is_set():
+            logger.info(f"Stopping download of {key} due to shutdown signal.")
+            return None
 
         try:
             logger.info(f"Downloading {key}")
-            with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-                temp_filename = temp_file.name
-
+            temp_filename = os.path.join(download_folder, os.path.basename(key))
             self.s3_client.download_file(self.bucket_name, key, temp_filename)
-            
-            # Extract the gz file
+
+            if stop_event.is_set():
+                logger.info(f"Stopping extraction of {key} due to shutdown signal.")
+                return None
+
+            # Extract the file
+            dest_path = temp_filename.rstrip('.gz')
             with gzip.open(temp_filename, 'rb') as f_in:
                 with open(dest_path, 'wb') as f_out:
                     shutil.copyfileobj(f_in, f_out)
+
+            # Convert dest_path to a Path object
+            dest_path = Path(dest_path)
 
             logger.debug(f"Extracted {key} to {dest_path}")
             logger.debug(f"  Compressed size: {s3_object['Size']} bytes")
