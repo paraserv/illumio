@@ -28,8 +28,6 @@ class HealthReporter:
         self.gz_files_processed = {'summaries': 0, 'auditable_events': 0}
         self.logs_extracted = {'summaries': 0, 'auditable_events': 0}
         self.syslog_messages_sent = {'summaries': 0, 'auditable_events': 0}
-        self.errors_count = {'summaries': 0, 'auditable_events': 0, 'general': 0}
-        self.dropped_logs = {'summaries': 0, 'auditable_events': 0}
         self.running = False
         self.lock = threading.Lock()
         self.last_s3_ingestion_rate = 0.0
@@ -43,6 +41,13 @@ class HealthReporter:
         self.state_auditable_events_count = 0
         self.checkpoint_summaries_count = 0
         self.checkpoint_auditable_events_count = 0
+
+        # Load settings
+        config = configparser.ConfigParser()
+        script_dir = Path(__file__).parent
+        settings_file = script_dir / 'settings.ini'
+        config.read(settings_file)
+        self.enable_health_reporter = config.getboolean('HealthReporting', 'enable_health_reporter', fallback=True)
 
     def _get_health_log_file(self):
         script_dir = Path(__file__).parent
@@ -96,16 +101,12 @@ class HealthReporter:
         summary_stats = (
             f"Summary Logs: GZ Files Processed: {self.gz_files_processed['summaries']}, "
             f"Logs Extracted: {self.logs_extracted['summaries']}, "
-            f"Syslog Messages Sent: {self.syslog_messages_sent['summaries']}, "
-            f"Dropped Logs: {self.dropped_logs['summaries']}, "
-            f"Errors: {self.errors_count['summaries']}"
+            f"Syslog Messages Sent: {self.syslog_messages_sent['summaries']}"
         )
         audit_stats = (
             f"Audit Logs: GZ Files Processed: {self.gz_files_processed['auditable_events']}, "
             f"Logs Extracted: {self.logs_extracted['auditable_events']}, "
-            f"Syslog Messages Sent: {self.syslog_messages_sent['auditable_events']}, "
-            f"Dropped Logs: {self.dropped_logs['auditable_events']}, "
-            f"Errors: {self.errors_count['auditable_events']}"
+            f"Syslog Messages Sent: {self.syslog_messages_sent['auditable_events']}"
         )
         self.log_info(summary_stats)
         self.log_info(audit_stats)
@@ -130,18 +131,9 @@ class HealthReporter:
         with self.lock:
             self.syslog_messages_sent[log_type] += count
 
-    def report_error(self, error_message, log_type):
-        with self.lock:
-            if log_type not in self.errors_count:
-                log_type = 'general'
-            self.errors_count[log_type] += 1
-            self.log_error(f"Error ({log_type}): {error_message}")
-
-    def report_dropped_log(self, log_type):
-        with self.lock:
-            self.dropped_logs[log_type] += 1
-
     def log_info(self, message):
+        if not self.enable_health_reporter:
+            return
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_message = f"{timestamp} - INFO - {message}"
         with open(self.health_log_file, 'a') as f:
@@ -149,6 +141,8 @@ class HealthReporter:
         logger.info(f"Health Report: {message}")
 
     def log_error(self, message):
+        if not self.enable_health_reporter:
+            return
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_message = f"{timestamp} - ERROR - {message}"
         with open(self.health_log_file, 'a') as f:
@@ -189,10 +183,8 @@ class HealthReporter:
                 except ValueError:
                     logger.error(f"Health Reporter: Failed to parse S3 ingestion rate from message: {message}")
 
-    def log_recovered_state(self, state_summaries_count, state_auditable_events_count,
-                            checkpoint_summaries_count, checkpoint_auditable_events_count):
+    def log_recovered_state(self, state_summaries_count, state_auditable_events_count):
         self.log_info(f"Recovered State - Summaries: {state_summaries_count}, Auditable Events: {state_auditable_events_count}")
-        self.log_info(f"Recovered Checkpoint - Summaries: {checkpoint_summaries_count}, Auditable Events: {checkpoint_auditable_events_count}")
 
     def log_termination_signal_received(self):
         with self.lock:

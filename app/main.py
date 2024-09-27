@@ -53,11 +53,11 @@ def signal_handler(signum, frame):
     stop_event.set()
     # Wait for a short period to allow current processing to complete
     time.sleep(5)
-    shutdown(processed_keys, already_processed_files)
+    shutdown(processed_keys)
     sys.exit(0)
 
-def shutdown(processed_keys, already_processed_files):
-    global executor, state_file, checkpoint_file, log_processor, health_reporter
+def shutdown(processed_keys):
+    global executor, state_file, log_processor, health_reporter
     logger.info("Initiating shutdown...")
 
     try:
@@ -71,18 +71,10 @@ def shutdown(processed_keys, already_processed_files):
             log_processor.close()
             logger.info("Syslog connection closed.")
 
-        # Initialize counts
-        summaries_state_count = len(processed_keys['summaries'])
-        auditable_events_state_count = len(processed_keys['auditable_events'])
-        summaries_checkpoint_count = len([f for f in already_processed_files if 'summaries' in f])
-        auditable_events_checkpoint_count = len([f for f in already_processed_files if 'auditable_events' in f])
-
         # Update counts in health_reporter
         if health_reporter:
-            health_reporter.state_summaries_count = summaries_state_count
-            health_reporter.state_auditable_events_count = auditable_events_state_count
-            health_reporter.checkpoint_summaries_count = summaries_checkpoint_count
-            health_reporter.checkpoint_auditable_events_count = auditable_events_checkpoint_count
+            health_reporter.state_summaries_count = len(processed_keys['summaries'])
+            health_reporter.state_auditable_events_count = len(processed_keys['auditable_events'])
 
             # Now stop the health_reporter
             if health_reporter.running:
@@ -106,23 +98,6 @@ def save_state(processed_keys, state_file):
     summaries_count = len(state_data['summaries'])
     auditable_events_count = len(state_data['auditable_events'])
     logger.info(f"Saved state: Summaries: {summaries_count}, Auditable Events: {auditable_events_count}")
-    # Removed the call to health_reporter.log_saved_state() with arguments
-    # if health_reporter:
-    #     health_reporter.log_saved_state(summaries_count, auditable_events_count)
-
-def save_checkpoint(already_processed_files, checkpoint_file):
-    checkpoint_data = {
-        'summaries': [f for f in already_processed_files if 'summaries' in f],
-        'auditable_events': [f for f in already_processed_files if 'auditable_events' in f]
-    }
-    with open(checkpoint_file, 'w') as f:
-        json.dump(checkpoint_data, f)
-    summaries_count = len(checkpoint_data['summaries'])
-    auditable_events_count = len(checkpoint_data['auditable_events'])
-    logger.info(f"Saved checkpoint: {summaries_count} summary files, {auditable_events_count} auditable event files")
-    # Removed the call to health_reporter.log_saved_checkpoint() with arguments
-    # if health_reporter:
-    #     health_reporter.log_saved_checkpoint(summaries_count, auditable_events_count)
 
 def load_state(state_file):
     processed_keys = {'summaries': {}, 'auditable_events': {}}
@@ -142,46 +117,6 @@ def load_state(state_file):
         logger.info("No state file found. Starting from scratch.")
     return processed_keys
 
-def load_checkpoint(checkpoint_file):
-    if checkpoint_file.exists():
-        with open(checkpoint_file, 'r') as f:
-            checkpoint_data = json.load(f)
-        summary_files = set(checkpoint_data.get('summaries', []))
-        auditable_files = set(checkpoint_data.get('auditable_events', []))
-        logger.info(f"Loaded checkpoint: {len(summary_files)} summary files, {len(auditable_files)} auditable event files")
-        return summary_files.union(auditable_files)
-    logger.info("No checkpoint file found.")
-    return set()
-
-def get_files_for_batch(batch_id):
-    global new_objects, BATCH_SIZE
-    if BATCH_SIZE is None:
-        logger.error("BATCH_SIZE is not initialized")
-        return set()
-    start_index = batch_id * BATCH_SIZE
-    end_index = start_index + BATCH_SIZE
-    batch_files = new_objects[start_index:end_index] if start_index < len(new_objects) else []
-    return set(obj['Key'] for obj in batch_files)
-
-def recover_from_unexpected_stop(downloaded_files_folder, checkpoint_file, state_file):
-    global processed_keys
-    logger.info("Starting recovery process from last stop...")
-    
-    cleanup_downloaded_files(downloaded_files_folder, max_age_hours=1)
-    
-    already_processed_files = load_checkpoint(checkpoint_file)
-    
-    if state_file.exists():
-        with open(state_file, 'r') as f:
-            state_data = json.load(f)
-        processed_keys = {k: datetime.fromisoformat(v) for k, v in state_data.items()}
-        logger.info(f"Loaded {len(processed_keys)} processed keys from state file")
-    else:
-        processed_keys = {}
-        logger.info("No state file found. Starting from scratch.")
-
-    return already_processed_files
-
 def read_state_file(state_file):
     if state_file.exists():
         with open(state_file, 'r') as f:
@@ -192,18 +127,8 @@ def read_state_file(state_file):
     else:
         return 0, 0
 
-def read_checkpoint_file(checkpoint_file):
-    if checkpoint_file.exists():
-        with open(checkpoint_file, 'r') as f:
-            checkpoint_data = json.load(f)
-        summaries_count = len(checkpoint_data.get('summaries', []))
-        auditable_events_count = len(checkpoint_data.get('auditable_events', []))
-        return summaries_count, auditable_events_count
-    else:
-        return 0, 0
-
 def main():
-    global executor, processed_keys, state_file, config, BATCH_SIZE, checkpoint_file, already_processed_files, log_processor, health_reporter
+    global executor, processed_keys, state_file, config, BATCH_SIZE, log_processor, health_reporter
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
@@ -211,22 +136,19 @@ def main():
     try:
         config = Config()
 
-        # Initialize state_file and checkpoint_file paths only once
+        # Initialize state_file path only once
         state_file = config.BASE_FOLDER / config.STATE_FILE
-        checkpoint_file = config.BASE_FOLDER / config.CHECKPOINT_FILE
 
         # Initialize HealthReporter
         health_reporter = HealthReporter(config.HEARTBEAT_INTERVAL, config.SUMMARY_INTERVAL)
         health_reporter.start()
 
-        # Read counts from state.json and checkpoint.json
+        # Read counts from state.json
         state_summaries_count, state_auditable_events_count = read_state_file(state_file)
-        checkpoint_summaries_count, checkpoint_auditable_events_count = read_checkpoint_file(checkpoint_file)
 
         # Log recovered state to health report
         health_reporter.log_recovered_state(
-            state_summaries_count, state_auditable_events_count,
-            checkpoint_summaries_count, checkpoint_auditable_events_count
+            state_summaries_count, state_auditable_events_count
         )
 
         # Initialize LogProcessor
@@ -254,21 +176,14 @@ def main():
 
         # Initialize processed_keys for both summaries and auditable_events
         processed_keys = {'summaries': {}, 'auditable_events': {}}
-        already_processed_files = set()
 
-        # Explicitly create state and checkpoint files if they don't exist
+        # Explicitly create state file if it doesn't exist
         if not state_file.exists():
             save_state(processed_keys, state_file)  # Pass initialized processed_keys
             logger.info(f"Created new state file: {state_file}")
-        if not checkpoint_file.exists():
-            save_checkpoint(already_processed_files, checkpoint_file)
-            logger.info(f"Created new checkpoint file: {checkpoint_file}")
 
         # Load state from the state file
         processed_keys = load_state(state_file)
-
-        # Load checkpoint from the checkpoint file
-        already_processed_files = load_checkpoint(checkpoint_file)
 
         boto_config = BotoCoreConfig(
             max_pool_connections=config.MAX_POOL_CONNECTIONS,
@@ -285,8 +200,7 @@ def main():
             health_reporter=health_reporter,
             max_pool_connections=config.MAX_POOL_CONNECTIONS,
             boto_config=boto_config,
-            state_file=state_file,
-            checkpoint_file=checkpoint_file
+            state_file=state_file
         )
 
         processed_keys_lock = threading.Lock()
@@ -336,7 +250,7 @@ def main():
                             future = executor.submit(
                                 handle_log_file_with_retry,
                                 s3_object, s3_manager, log_processor, config.DOWNLOADED_FILES_FOLDER,
-                                processed_keys, processed_keys_lock, health_reporter, log_type, already_processed_files, stop_event
+                                processed_keys, processed_keys_lock, health_reporter, log_type, stop_event
                             )
                             futures.append((future, s3_object, log_type))
 
@@ -351,18 +265,14 @@ def main():
                                         processed_keys[log_type][s3_object['Key']] = datetime.now(pytz.UTC)
                                     processed_count += 1
                                     logger.info(f"Successfully processed: {s3_object['Key']}, Type: {log_type}")
-                                    # Add the processed file to the already_processed_files set
-                                    with processed_keys_lock:
-                                        already_processed_files.add(s3_object['Key'])
                                 else:
                                     logger.error(f"Failed to process: {s3_object['Key']}, Type: {log_type}")
                             except Exception as e:
                                 logger.error(f"Error processing {s3_object['Key']}: {str(e)}")
                                 health_reporter.report_error(f"Error processing {s3_object['Key']}: {str(e)}", log_type)
 
-                        # Save state and checkpoint after processing each log type
+                        # Save state after processing each log type
                         s3_manager.save_state(processed_keys)
-                        save_checkpoint(already_processed_files, checkpoint_file)
 
                         logger.info(f"Processed {processed_count} {log_type} log files.")
                         total_processed += processed_count
@@ -420,12 +330,12 @@ def main():
         if health_reporter:
             health_reporter.report_error(str(e), 'general')
     finally:
-        shutdown(processed_keys, already_processed_files)
+        shutdown(processed_keys)
         logger.info("Script has been terminated.")
 
 def handle_log_file_with_retry(s3_object, s3_manager, log_processor, downloaded_files_folder,
                                processed_keys, processed_keys_lock, health_reporter, log_type,
-                               already_processed_files, stop_event):
+                               stop_event):
     logger.info(f"Handling log file: {s3_object['Key']}, Type: {log_type}")
     if s3_object['Key'] in processed_keys[log_type]:
         logger.info(f"Skipping already processed file: {s3_object['Key']}")
@@ -447,7 +357,6 @@ def handle_log_file_with_retry(s3_object, s3_manager, log_processor, downloaded_
                 logger.info(f"Successfully processed and deleted: {dest_path}")
                 with processed_keys_lock:
                     processed_keys[log_type][s3_object['Key']] = datetime.now(pytz.UTC)
-                    already_processed_files.add(s3_object['Key'])
                 logger.info(f"Added {s3_object['Key']} to processed keys")
                 health_reporter.report_logs_extracted(logs_count, log_type)
                 health_reporter.report_syslog_sent(logs_count, log_type)

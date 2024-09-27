@@ -34,7 +34,6 @@ class Config:
         self.DOWNLOADED_FILES_FOLDER = self.BASE_FOLDER / config.get('Paths', 'DOWNLOADED_FILES_FOLDER', fallback='illumio')
         self.LOG_FOLDER = self.BASE_FOLDER / config.get('Paths', 'LOG_FOLDER', fallback='logs')
         self.STATE_FILE = config.get('Paths', 'STATE_FILE', fallback='state.json')
-        self.CHECKPOINT_FILE = config.get('Paths', 'CHECKPOINT_FILE', fallback='checkpoint.json')
 
         # S3 Settings
         self.POLL_INTERVAL = config.getfloat('S3', 'POLL_INTERVAL', fallback=60.0)
