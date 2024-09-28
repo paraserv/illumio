@@ -13,16 +13,13 @@ import configparser
 # Local application imports
 from logger_config import get_logger
 
-# Typing imports
-from typing import Optional
-
 logger = get_logger(__name__)
 
 class HealthReporter:
-    def __init__(self, heartbeat_interval, summary_interval):
+    def __init__(self, heartbeat_interval, summary_interval, log_folder):
         self.heartbeat_interval = heartbeat_interval
         self.summary_interval = summary_interval
-        self.health_log_file = self._get_health_log_file()
+        self.health_log_file = Path(log_folder) / 'health_report.log'
         self.last_summary_time = datetime.now()
         self.start_time = datetime.now()
         self.gz_files_processed = {'summaries': 0, 'auditable_events': 0}
@@ -39,24 +36,18 @@ class HealthReporter:
         # Initialize variables to store final counts
         self.state_summaries_count = 0
         self.state_auditable_events_count = 0
-        self.checkpoint_summaries_count = 0
-        self.checkpoint_auditable_events_count = 0
 
         # Load settings
         config = configparser.ConfigParser()
         script_dir = Path(__file__).parent
         settings_file = script_dir / 'settings.ini'
         config.read(settings_file)
-        self.enable_health_reporter = config.getboolean('HealthReporting', 'enable_health_reporter', fallback=True)
+        self.enable_health_reporter = config.getboolean(
+            'HealthReporting', 'enable_health_reporter', fallback=True
+        )
 
-    def _get_health_log_file(self):
-        script_dir = Path(__file__).parent
-        settings_file = script_dir / 'settings.ini'
-        config = configparser.ConfigParser(interpolation=None)
-        config.read(settings_file)
-        base_folder = Path(script_dir).parent
-        log_folder = base_folder / config.get('Paths', 'LOG_FOLDER', fallback='logs')
-        return log_folder / 'health_report.log'
+        # Set the state_file path inside the app directory
+        self.state_file = script_dir / 'state.json'
 
     def start(self):
         if not self.running:
@@ -79,7 +70,6 @@ class HealthReporter:
 
         self.log_summary(final=True)
         self.log_saved_state()
-        self.log_saved_checkpoint()
         self.log_info("*** Application Stopped ***")  # Added asterisks for clarity
 
     def _heartbeat_loop(self):
@@ -192,7 +182,11 @@ class HealthReporter:
             self.log_info("Termination signal received")
 
     def log_saved_state(self):
-        self.log_info(f"Saved state - Summaries: {self.state_summaries_count}, Auditable Events: {self.state_auditable_events_count}")
+        self.log_info(
+            f"Saved state to {self.state_file} - Summaries: {self.state_summaries_count}, "
+            f"Auditable Events: {self.state_auditable_events_count}"
+        )
 
-    def log_saved_checkpoint(self):
-        self.log_info(f"Saved checkpoint - Summaries: {self.checkpoint_summaries_count}, Auditable Events: {self.checkpoint_auditable_events_count}")
+    def report_error(self, message, log_type):
+        with self.lock:
+            self.log_error(f"{log_type} Error: {message}")

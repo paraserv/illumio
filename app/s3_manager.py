@@ -40,7 +40,7 @@ class S3Manager:
         max_pool_connections,
         boto_config=None,
         state_file=None,
-        checkpoint_file=None
+        downloaded_files_folder=None  # Added this parameter
     ):
         self.session = boto3.Session(
             aws_access_key_id=aws_access_key_id,
@@ -82,8 +82,15 @@ class S3Manager:
         self.last_log_time = time.time()
         self.log_interval = 60  # Log at most once per minute
 
-        self.state_file = state_file
-        self.checkpoint_file = checkpoint_file
+        # Set the state_file path
+        self.state_file = Path(state_file).resolve() if state_file else None
+
+        # Set the downloaded_files_folder path
+        self.downloaded_files_folder = Path(downloaded_files_folder).resolve() if downloaded_files_folder else None
+
+        # Log the paths being used
+        logger.info(f"S3Manager will save state to: {self.state_file}")
+        logger.info(f"S3Manager will download files to: {self.downloaded_files_folder}")
 
     def get_new_s3_objects(self, log_type, processed_keys, time_window_start, time_window_end, batch_size):
         folder = f"illumio/{log_type}/"
@@ -153,19 +160,21 @@ class S3Manager:
         for log_type in ['summaries', 'auditable_events']:
             for key, timestamp in processed_keys[log_type].items():
                 state_data[log_type][key] = timestamp.isoformat()
-        
-        with open(self.state_file, 'w') as f:
-            json.dump(state_data, f)
-        logger.info(f"Saved state: Summaries: {len(state_data['summaries'])}, Auditable Events: {len(state_data['auditable_events'])}")
 
-    def save_checkpoint(self, processed_files):
-        checkpoint_data = {
-            'summaries': [f for f in processed_files if 'summaries' in f],
-            'auditable_events': [f for f in processed_files if 'auditable_events' in f]
-        }
-        with open(self.checkpoint_file, 'w') as f:
-            json.dump(checkpoint_data, f)
-        logger.info(f"Saved checkpoint: {len(checkpoint_data['summaries'])} summary files, {len(checkpoint_data['auditable_events'])} auditable event files")
+        if not self.state_file:
+            logger.error("State file path is not set.")
+            return
+
+        logger.info(f"Saving state to: {self.state_file}")
+        try:
+            with open(self.state_file, 'w') as f:
+                json.dump(state_data, f)
+            logger.info(
+                f"Saved state: Summaries: {len(state_data['summaries'])}, "
+                f"Auditable Events: {len(state_data['auditable_events'])}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to save state file {self.state_file}: {e}")
 
     def estimate_log_entries(self, objects):
         # This is a rough estimate. For accuracy, we'd need to download and count entries in each file.
@@ -202,7 +211,7 @@ class S3Manager:
             logger.warning(f"Unable to extract timestamp from filename: {filename}")
             return None
 
-    def download_and_extract(self, s3_object, download_folder, stop_event: threading.Event):
+    def download_and_extract(self, s3_object, stop_event: threading.Event):
         key = s3_object['Key']
 
         if stop_event.is_set():
@@ -211,21 +220,18 @@ class S3Manager:
 
         try:
             logger.info(f"Downloading {key}")
-            temp_filename = os.path.join(download_folder, os.path.basename(key))
-            self.s3_client.download_file(self.bucket_name, key, temp_filename)
+            temp_filename = self.downloaded_files_folder / os.path.basename(key)
+            self.s3_client.download_file(self.bucket_name, key, str(temp_filename))
 
             if stop_event.is_set():
                 logger.info(f"Stopping extraction of {key} due to shutdown signal.")
                 return None
 
             # Extract the file
-            dest_path = temp_filename.rstrip('.gz')
+            dest_path = temp_filename.with_suffix('')
             with gzip.open(temp_filename, 'rb') as f_in:
                 with open(dest_path, 'wb') as f_out:
                     shutil.copyfileobj(f_in, f_out)
-
-            # Convert dest_path to a Path object
-            dest_path = Path(dest_path)
 
             logger.debug(f"Extracted {key} to {dest_path}")
             logger.debug(f"  Compressed size: {s3_object['Size']} bytes")
@@ -236,5 +242,5 @@ class S3Manager:
             logger.error(f"Error downloading or extracting {key}: {e}")
             return None
         finally:
-            if os.path.exists(temp_filename):
-                os.remove(temp_filename)
+            if temp_filename.exists():
+                temp_filename.unlink()

@@ -17,9 +17,9 @@ logs/
 illumio/
 
 # Python bytecode files
-__pycache__/
-*.py[cod]
-*$py.class
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
 
 # Ignore backup and temporary files
 *.bak
@@ -32,3 +32,6 @@ docker-compose.yml
 
 # Ignore version control
 .git
+
+# Ensure state.json is not ignored
+!state.json

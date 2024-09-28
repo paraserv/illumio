@@ -11,17 +11,15 @@ import json
 import time
 import signal
 import shutil
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime, timedelta
 
 # Third-party imports
-from dotenv import load_dotenv
-from tenacity import retry, stop_after_attempt, wait_exponential
 import psutil
 import pytz
-from botocore.exceptions import ClientError
 from botocore.config import Config as BotoCoreConfig
+from tenacity import retry, wait_exponential, stop_after_attempt
 
 # Local application imports
 from s3_manager import S3Manager
@@ -41,8 +39,6 @@ executor = None
 processed_keys = {'summaries': {}, 'auditable_events': {}}
 state_file = None
 config = None
-BATCH_SIZE = None
-checkpoint_file = None
 already_processed_files = set()
 stop_event = threading.Event()
 log_processor = None  # Declare log_processor globally
@@ -84,21 +80,6 @@ def shutdown(processed_keys):
     except Exception as e:
         logger.error(f"Exception during shutdown: {e}")
 
-def save_state(processed_keys, state_file):
-    state_data = {
-        'summaries': {},
-        'auditable_events': {}
-    }
-    for log_type in ['summaries', 'auditable_events']:
-        for key, timestamp in processed_keys[log_type].items():
-            state_data[log_type][key] = timestamp.isoformat()
-
-    with open(state_file, 'w') as f:
-        json.dump(state_data, f)
-    summaries_count = len(state_data['summaries'])
-    auditable_events_count = len(state_data['auditable_events'])
-    logger.info(f"Saved state: Summaries: {summaries_count}, Auditable Events: {auditable_events_count}")
-
 def load_state(state_file):
     processed_keys = {'summaries': {}, 'auditable_events': {}}
     if state_file.exists():
@@ -117,18 +98,66 @@ def load_state(state_file):
         logger.info("No state file found. Starting from scratch.")
     return processed_keys
 
-def read_state_file(state_file):
-    if state_file.exists():
-        with open(state_file, 'r') as f:
-            state_data = json.load(f)
-        summaries_count = len(state_data.get('summaries', {}))
-        auditable_events_count = len(state_data.get('auditable_events', {}))
-        return summaries_count, auditable_events_count
+def handle_log_file_with_retry(
+    s3_object, s3_manager, log_processor, processed_keys,
+    processed_keys_lock, health_reporter, log_type, stop_event
+):
+    @retry(wait=wait_exponential(min=1, max=10), stop=stop_after_attempt(5))
+    def process():
+        if stop_event.is_set():
+            return False
+        # Download and extract the log file
+        local_file = s3_manager.download_and_extract(s3_object, stop_event)
+        if not local_file:
+            raise Exception(f"Failed to download and extract {s3_object['Key']}")
+        # Process the log file
+        success, log_count = log_processor.process_log_file(local_file, log_type, stop_event)
+        if not success:
+            raise Exception(f"Failed to process log file {local_file}")
+        # Report processed counts to health_reporter
+        health_reporter.report_gz_file_processed(log_type)
+        return True
+
+    try:
+        return process()
+    except Exception as e:
+        logger.error(f"Error processing {s3_object['Key']}: {e}")
+        health_reporter.report_error(str(e), log_type)
+        return False
+
+def adjust_batch_size(current_batch_size, processing_time, min_batch_size, max_batch_size):
+    # Simple logic to adjust batch size based on processing time
+    desired_processing_time_per_batch = 60  # seconds
+    if processing_time > desired_processing_time_per_batch:
+        new_batch_size = max(min_batch_size, current_batch_size // 2)
     else:
-        return 0, 0
+        new_batch_size = min(max_batch_size, current_batch_size + 10)
+    return new_batch_size
+
+def adjust_max_workers(current_workers, min_workers, max_workers):
+    # Simple logic to adjust the number of workers
+    cpu_utilization = psutil.cpu_percent()
+    if cpu_utilization > 80:
+        new_workers = max(min_workers, current_workers - 1)
+    elif cpu_utilization < 50:
+        new_workers = min(max_workers, current_workers + 1)
+    else:
+        new_workers = current_workers
+    return new_workers
+
+def cleanup_downloaded_files(download_folder):
+    # Remove files older than a certain age
+    file_retention_time = timedelta(hours=1)
+    now = datetime.now()
+    for file in download_folder.glob('*'):
+        if file.is_file():
+            file_modified_time = datetime.fromtimestamp(file.stat().st_mtime)
+            if now - file_modified_time > file_retention_time:
+                file.unlink()
+                logger.info(f"Deleted old file: {file}")
 
 def main():
-    global executor, processed_keys, state_file, config, BATCH_SIZE, log_processor, health_reporter
+    global executor, processed_keys, state_file, config, log_processor, health_reporter
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
@@ -136,20 +165,19 @@ def main():
     try:
         config = Config()
 
-        # Initialize state_file path only once
-        state_file = config.BASE_FOLDER / config.STATE_FILE
+        # Use the STATE_FILE path directly from config
+        state_file = config.STATE_FILE
 
         # Initialize HealthReporter
-        health_reporter = HealthReporter(config.HEARTBEAT_INTERVAL, config.SUMMARY_INTERVAL)
+        health_reporter = HealthReporter(
+            config.HEARTBEAT_INTERVAL,
+            config.SUMMARY_INTERVAL,
+            log_folder=config.LOG_FOLDER  # Pass the log folder
+        )
         health_reporter.start()
 
-        # Read counts from state.json
-        state_summaries_count, state_auditable_events_count = read_state_file(state_file)
-
-        # Log recovered state to health report
-        health_reporter.log_recovered_state(
-            state_summaries_count, state_auditable_events_count
-        )
+        # Load state from the state file if it exists
+        processed_keys = load_state(state_file)
 
         # Initialize LogProcessor
         log_processor = LogProcessor(
@@ -174,22 +202,11 @@ def main():
         config.DOWNLOADED_FILES_FOLDER.mkdir(parents=True, exist_ok=True)
         config.LOG_FOLDER.mkdir(parents=True, exist_ok=True)
 
-        # Initialize processed_keys for both summaries and auditable_events
-        processed_keys = {'summaries': {}, 'auditable_events': {}}
-
-        # Explicitly create state file if it doesn't exist
-        if not state_file.exists():
-            save_state(processed_keys, state_file)  # Pass initialized processed_keys
-            logger.info(f"Created new state file: {state_file}")
-
-        # Load state from the state file
-        processed_keys = load_state(state_file)
-
+        # Initialize S3Manager
         boto_config = BotoCoreConfig(
             max_pool_connections=config.MAX_POOL_CONNECTIONS,
             retries={'max_attempts': 3, 'mode': 'standard'}
         )
-
         s3_manager = S3Manager(
             aws_access_key_id=config.AWS_ACCESS_KEY_ID,
             aws_secret_access_key=config.AWS_SECRET_ACCESS_KEY,
@@ -200,7 +217,8 @@ def main():
             health_reporter=health_reporter,
             max_pool_connections=config.MAX_POOL_CONNECTIONS,
             boto_config=boto_config,
-            state_file=state_file
+            state_file=config.STATE_FILE,  # Pass the correct state_file path
+            downloaded_files_folder=config.DOWNLOADED_FILES_FOLDER  # Pass the downloaded files folder
         )
 
         processed_keys_lock = threading.Lock()
@@ -208,7 +226,7 @@ def main():
         ADJUSTMENT_INTERVAL = 60  # seconds
         last_adjustment_time = time.time()
 
-        baseline_period = 300  # 5 minutes
+        baseline_period = config.BASELINE_PERIOD  # Fetch baseline period from config
         baseline_start_time = time.time()
 
         while not stop_event.is_set():
@@ -249,8 +267,8 @@ def main():
                                 break  # Exit if stop_event is set
                             future = executor.submit(
                                 handle_log_file_with_retry,
-                                s3_object, s3_manager, log_processor, config.DOWNLOADED_FILES_FOLDER,
-                                processed_keys, processed_keys_lock, health_reporter, log_type, stop_event
+                                s3_object, s3_manager, log_processor, processed_keys,
+                                processed_keys_lock, health_reporter, log_type, stop_event
                             )
                             futures.append((future, s3_object, log_type))
 
@@ -271,7 +289,7 @@ def main():
                                 logger.error(f"Error processing {s3_object['Key']}: {str(e)}")
                                 health_reporter.report_error(f"Error processing {s3_object['Key']}: {str(e)}", log_type)
 
-                        # Save state after processing each log type
+                        # After processing each log type, save the state
                         s3_manager.save_state(processed_keys)
 
                         logger.info(f"Processed {processed_count} {log_type} log files.")
@@ -332,84 +350,6 @@ def main():
     finally:
         shutdown(processed_keys)
         logger.info("Script has been terminated.")
-
-def handle_log_file_with_retry(s3_object, s3_manager, log_processor, downloaded_files_folder,
-                               processed_keys, processed_keys_lock, health_reporter, log_type,
-                               stop_event):
-    logger.info(f"Handling log file: {s3_object['Key']}, Type: {log_type}")
-    if s3_object['Key'] in processed_keys[log_type]:
-        logger.info(f"Skipping already processed file: {s3_object['Key']}")
-        return True
-
-    try:
-        # Check stop_event before processing
-        if stop_event.is_set():
-            logger.info(f"Stopping processing of {s3_object['Key']} due to shutdown signal.")
-            return False
-
-        dest_path = s3_manager.download_and_extract(s3_object, downloaded_files_folder, stop_event)
-        if dest_path:
-            logger.info(f"Successfully downloaded and extracted: {dest_path}")
-            health_reporter.report_gz_file_processed(log_type)
-            success, logs_count = log_processor.process_log_file(dest_path, log_type, stop_event)
-            if success:
-                dest_path.unlink()
-                logger.info(f"Successfully processed and deleted: {dest_path}")
-                with processed_keys_lock:
-                    processed_keys[log_type][s3_object['Key']] = datetime.now(pytz.UTC)
-                logger.info(f"Added {s3_object['Key']} to processed keys")
-                health_reporter.report_logs_extracted(logs_count, log_type)
-                health_reporter.report_syslog_sent(logs_count, log_type)
-                return True
-            else:
-                logger.error(f"Failed to process log file: {dest_path}")
-        else:
-            logger.error(f"Failed to download or extract: {s3_object['Key']}")
-    except Exception as e:
-        logger.error(f"Error handling log file {s3_object['Key']}: {e}")
-        health_reporter.report_error(f"Error processing {s3_object['Key']}: {str(e)}", log_type)
-    
-    return False
-
-def adjust_batch_size(current_batch_size, processing_time, min_batch_size, max_batch_size, target_time=30):
-    cpu_usage = psutil.cpu_percent()
-    memory_usage = psutil.virtual_memory().percent
-    
-    if processing_time < target_time and cpu_usage < 70 and memory_usage < 80:
-        return min(current_batch_size * 1.5, max_batch_size)
-    elif processing_time > target_time or cpu_usage > 90 or memory_usage > 90:
-        return max(current_batch_size * 0.75, min_batch_size)
-    return current_batch_size
-
-def adjust_max_workers(current_workers, min_workers, max_workers):
-    cpu_count = psutil.cpu_count()
-    memory_available = psutil.virtual_memory().available / (1024 * 1024 * 1024)
-    
-    if memory_available > 4 and cpu_count > current_workers:
-        return min(current_workers + 1, max_workers)
-    elif memory_available < 2 or psutil.cpu_percent() > 80:
-        return max(current_workers - 1, min_workers)
-    return current_workers
-
-def cleanup_downloaded_files(folder: Path, max_age_hours: int = 24):
-    current_time = datetime.now()
-    for file in folder.glob('**/*'):
-        if file.is_file():
-            file_age = current_time - datetime.fromtimestamp(file.stat().st_mtime)
-            if file_age > timedelta(hours=max_age_hours):
-                try:
-                    file.unlink()
-                    logger.info(f"Deleted old file: {file}")
-                except Exception as e:
-                    logger.error(f"Failed to delete file {file}: {e}")
-
-    for dir_path in folder.glob('**/*'):
-        if dir_path.is_dir():
-            try:
-                dir_path.rmdir()
-                logger.info(f"Removed empty directory: {dir_path}")
-            except OSError:
-                pass
 
 if __name__ == '__main__':
     main()

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# app/config.py
 """
 Configuration loader for the application.
 """
@@ -7,6 +8,7 @@ Configuration loader for the application.
 import os
 from pathlib import Path
 import configparser
+
 
 # Third-party imports
 from dotenv import load_dotenv
@@ -17,30 +19,43 @@ from typing import List
 class Config:
     def __init__(self):
         script_dir = Path(__file__).parent
-        env_path = script_dir.parent / '.env'
-        load_dotenv(dotenv_path=env_path)
 
+        # Set BASE_FOLDER to the parent directory of app
+        self.BASE_FOLDER = script_dir.parent.resolve()
+
+        # Load settings
         settings_file = script_dir / 'settings.ini'
         config = configparser.ConfigParser(interpolation=None)
         config.read(settings_file)
 
+        # Paths
+        self.DOWNLOADED_FILES_FOLDER = self.BASE_FOLDER / config.get(
+            'Paths', 'DOWNLOADED_FILES_FOLDER', fallback='illumio'
+        )
+        self.LOG_FOLDER = self.BASE_FOLDER / config.get(
+            'Paths', 'LOG_FOLDER', fallback='logs'
+        )
+
+        # Define STATE_FILE in the app directory
+        self.STATE_FILE = script_dir / 'state.json'
+
         # AWS Credentials
+        env_path = self.BASE_FOLDER / '.env'
+        load_dotenv(dotenv_path=env_path)
         self.AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
         self.AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
         self.S3_BUCKET_NAME = os.getenv('S3_BUCKET_NAME')
 
-        # Paths
-        self.BASE_FOLDER = (script_dir / config.get('Paths', 'BASE_FOLDER', fallback='..')).resolve()
-        self.DOWNLOADED_FILES_FOLDER = self.BASE_FOLDER / config.get('Paths', 'DOWNLOADED_FILES_FOLDER', fallback='illumio')
-        self.LOG_FOLDER = self.BASE_FOLDER / config.get('Paths', 'LOG_FOLDER', fallback='logs')
-        self.STATE_FILE = config.get('Paths', 'STATE_FILE', fallback='state.json')
-
         # S3 Settings
         self.POLL_INTERVAL = config.getfloat('S3', 'POLL_INTERVAL', fallback=60.0)
         self.LOG_TIMEFRAME = config.getfloat('S3', 'LOG_TIMEFRAME', fallback=1.0)
-        self.BASE_PATHS = config.get('S3', 'BASE_PATHS', fallback='illumio/summaries/,illumio/auditable_events/').split(',')
+        self.BASE_PATHS = config.get(
+            'S3', 'BASE_PATHS', fallback='illumio/summaries/,illumio/auditable_events/'
+        ).split(',')
         self.MAX_POOL_CONNECTIONS = config.getint('S3', 'MAX_POOL_CONNECTIONS', fallback=10)
-        self.ENABLE_DYNAMIC_TIMEFRAME = config.getboolean('Processing', 'ENABLE_DYNAMIC_TIMEFRAME', fallback=True)
+        self.ENABLE_DYNAMIC_TIMEFRAME = config.getboolean(
+            'Processing', 'ENABLE_DYNAMIC_TIMEFRAME', fallback=True
+        )
         self.TIME_WINDOW_HOURS = config.getfloat('Processing', 'TIME_WINDOW_HOURS', fallback=1.0)
 
         # Syslog Settings
@@ -50,7 +65,9 @@ class Config:
         self.MAX_MESSAGE_LENGTH = config.getint('Syslog', 'MAX_MESSAGE_LENGTH', fallback=1024)
         self.MIN_MESSAGES_PER_SECOND = config.getint('Syslog', 'MIN_MESSAGES_PER_SECOND', fallback=5)
         self.MAX_MESSAGES_PER_SECOND = config.getint('Syslog', 'MAX_MESSAGES_PER_SECOND', fallback=250)
-        self.ENABLE_DYNAMIC_SYSLOG_RATE = config.getboolean('Syslog', 'ENABLE_DYNAMIC_SYSLOG_RATE', fallback=True)
+        self.ENABLE_DYNAMIC_SYSLOG_RATE = config.getboolean(
+            'Syslog', 'ENABLE_DYNAMIC_SYSLOG_RATE', fallback=True
+        )
 
         # General Settings
         self.BEATNAME = config.get('General', 'BEATNAME', fallback='IllumioS3')
@@ -61,8 +78,12 @@ class Config:
         self.MAX_BATCH_SIZE = config.getint('Processing', 'MAX_BATCH_SIZE', fallback=1000)
         self.MIN_WORKERS = config.getint('Processing', 'MIN_WORKERS', fallback=1)
         self.MAX_WORKERS = config.getint('Processing', 'MAX_WORKERS', fallback=4)
-        self.ENABLE_DYNAMIC_BATCH_SIZE = config.getboolean('Processing', 'ENABLE_DYNAMIC_BATCH_SIZE', fallback=True)
-        self.ENABLE_DYNAMIC_WORKERS = config.getboolean('Processing', 'ENABLE_DYNAMIC_WORKERS', fallback=True)
+        self.ENABLE_DYNAMIC_BATCH_SIZE = config.getboolean(
+            'Processing', 'ENABLE_DYNAMIC_BATCH_SIZE', fallback=True
+        )
+        self.ENABLE_DYNAMIC_WORKERS = config.getboolean(
+            'Processing', 'ENABLE_DYNAMIC_WORKERS', fallback=True
+        )
 
         # Health Reporting Settings
         self.HEARTBEAT_INTERVAL = config.getfloat('HealthReporting', 'HEARTBEAT_INTERVAL', fallback=60.0)
