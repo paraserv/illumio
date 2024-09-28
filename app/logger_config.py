@@ -9,9 +9,11 @@ from pathlib import Path
 import configparser
 
 def setup_logging():
+    # Get the directory where the script is located
+    script_dir = Path(__file__).parent
+
     # Load settings
     config = configparser.ConfigParser(interpolation=None)  # Disable interpolation
-    script_dir = Path(__file__).parent
     config.read(script_dir / 'settings.ini')
 
     # Get logging settings
@@ -33,14 +35,16 @@ def setup_logging():
     file_formatter = logging.Formatter(file_log_format)
     console_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
+    # **Modify the log_folder path to be relative to script_dir**
+    log_folder = script_dir / config.get('Paths', 'LOG_FOLDER', fallback='logs')
+    log_folder.mkdir(parents=True, exist_ok=True)
+
     # Create console handler
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(console_formatter)
     root_logger.addHandler(console_handler)
 
     # Create file handler for app.log
-    log_folder = Path(script_dir.parent) / config.get('Paths', 'LOG_FOLDER', fallback='logs')
-    log_folder.mkdir(parents=True, exist_ok=True)
     app_log_file = log_folder / 'app.log'
     file_handler = RotatingFileHandler(app_log_file, maxBytes=max_log_size, backupCount=backup_count)
     file_handler.setFormatter(file_formatter)

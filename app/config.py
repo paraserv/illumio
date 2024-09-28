@@ -18,10 +18,10 @@ from typing import List
 
 class Config:
     def __init__(self):
-        script_dir = Path(__file__).parent
+        script_dir = Path(__file__).parent.resolve()
 
-        # Set BASE_FOLDER to the parent directory of app
-        self.BASE_FOLDER = script_dir.parent.resolve()
+        # Set BASE_FOLDER to the script directory
+        self.BASE_FOLDER = script_dir
 
         # Load settings
         settings_file = script_dir / 'settings.ini'
@@ -37,7 +37,9 @@ class Config:
         )
 
         # Define STATE_FILE in the app directory
-        self.STATE_FILE = script_dir / 'state.json'
+        self.STATE_FILE = self.BASE_FOLDER / config.get(
+            'Paths', 'STATE_FILE', fallback='state.json'
+        )
 
         # AWS Credentials
         env_path = self.BASE_FOLDER / '.env'
