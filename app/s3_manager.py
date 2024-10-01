@@ -32,15 +32,14 @@ class S3Manager:
         self,
         aws_access_key_id,
         aws_secret_access_key,
-        bucket_name,
-        log_timeframe,
-        base_paths,
-        enable_dynamic_timeframe,
+        s3_bucket_name,
+        minutes,
+        max_files_per_folder,
         health_reporter,
         max_pool_connections,
         boto_config=None,
         state_file=None,
-        downloaded_files_folder=None  # Added this parameter
+        downloaded_files_folder=None
     ):
         self.session = boto3.Session(
             aws_access_key_id=aws_access_key_id,
@@ -52,10 +51,9 @@ class S3Manager:
                 retries={'max_attempts': 10, 'mode': 'adaptive'}
             )
         self.s3_client = self.session.client('s3', config=boto_config)
-        self.bucket_name = bucket_name
-        self.log_timeframe = log_timeframe
-        self.base_paths = base_paths
-        self.enable_dynamic_timeframe = enable_dynamic_timeframe
+        self.s3_bucket_name = s3_bucket_name
+        self.minutes = minutes
+        self.max_files_per_folder = max_files_per_folder
         self.health_reporter = health_reporter
         self.last_check_time = datetime.now(pytz.UTC)
         self.last_check_count = 0
@@ -105,7 +103,7 @@ class S3Manager:
                 for prefix in prefixes:
                     paginator = self.s3_client.get_paginator('list_objects_v2')
                     page_iterator = paginator.paginate(
-                        Bucket=self.bucket_name,
+                        Bucket=self.s3_bucket_name,
                         Prefix=prefix
                     )
 
@@ -122,15 +120,17 @@ class S3Manager:
                             if len(new_objects) >= batch_size:
                                 break
             except Exception as e:
-                logger.error(f"Error listing objects for prefix {prefix}: {e}")
-                return []
+                logger.error(f"Error listing objects for {folder}: {e}")
+                # Continue processing even if an error occurs
+            finally:
+                logger.debug(f"Finished scanning for new {log_type} logs.")
         else:
             # Scan entire folder for auditable_events
             logger.info(f"Scanning folder for auditable_events: {folder}")
             try:
                 paginator = self.s3_client.get_paginator('list_objects_v2')
                 page_iterator = paginator.paginate(
-                    Bucket=self.bucket_name,
+                    Bucket=self.s3_bucket_name,
                     Prefix=folder
                 )
 
@@ -148,7 +148,9 @@ class S3Manager:
                             break
             except Exception as e:
                 logger.error(f"Error listing objects in folder {folder}: {e}")
-                return []
+                # Continue processing even if an error occurs
+            finally:
+                logger.debug(f"Finished scanning for new {log_type} logs.")
 
         return new_objects
 
@@ -159,7 +161,10 @@ class S3Manager:
         }
         for log_type in ['summaries', 'auditable_events']:
             for key, timestamp in processed_keys[log_type].items():
-                state_data[log_type][key] = timestamp.isoformat()
+                if isinstance(timestamp, datetime):
+                    state_data[log_type][key] = timestamp.isoformat()
+                else:
+                    state_data[log_type][key] = timestamp  # Assume it's already a string
 
         if not self.state_file:
             logger.error("State file path is not set.")
@@ -221,7 +226,17 @@ class S3Manager:
         try:
             logger.info(f"Downloading {key}")
             temp_filename = self.downloaded_files_folder / os.path.basename(key)
-            self.s3_client.download_file(self.bucket_name, key, str(temp_filename))
+            logger.debug(f"Temporary file path: {temp_filename}")
+            
+            # Ensure the parent directory exists
+            temp_filename.parent.mkdir(parents=True, exist_ok=True)
+            
+            try:
+                self.s3_client.download_file(self.s3_bucket_name, key, str(temp_filename))
+                logger.debug(f"Download completed: {temp_filename}")
+            except Exception as e:
+                logger.error(f"Failed to download {key} from S3: {e}")
+                return None
 
             if stop_event.is_set():
                 logger.info(f"Stopping extraction of {key} due to shutdown signal.")
@@ -229,6 +244,7 @@ class S3Manager:
 
             # Extract the file
             dest_path = temp_filename.with_suffix('')
+            logger.debug(f"Extracting to: {dest_path}")
             with gzip.open(temp_filename, 'rb') as f_in:
                 with open(dest_path, 'wb') as f_out:
                     shutil.copyfileobj(f_in, f_out)
@@ -240,7 +256,18 @@ class S3Manager:
             return dest_path
         except Exception as e:
             logger.error(f"Error downloading or extracting {key}: {e}")
+            logger.exception("Detailed error information:")
             return None
         finally:
-            if temp_filename.exists():
+            if 'temp_filename' in locals() and temp_filename.exists():
                 temp_filename.unlink()
+
+    def update_and_save_state(self, processed_keys, log_type, s3_key):
+        processed_keys[log_type][s3_key] = datetime.now(pytz.UTC)
+        self.save_state(processed_keys)
+
+    def load_state(self, state_file):
+        if os.path.exists(state_file):
+            with open(state_file, 'r') as f:
+                return json.load(f)
+        return {'summaries': {}, 'auditable_events': {}}

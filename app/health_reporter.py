@@ -49,15 +49,22 @@ class HealthReporter:
         # Set the state_file path inside the app directory
         self.state_file = script_dir / 'state.json'
 
+        self.dropped_logs = {'summaries': 0, 'auditable_events': 0}
+        self.drop_threshold = 100  # Threshold for alerts
+
+        self.stop_event = threading.Event()
+
     def start(self):
         if not self.running:
             self.running = True
+            self.stop_event.clear()
             self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop)
             self.heartbeat_thread.start()
             self.log_info("*** Application Started ***")  # Added asterisks for clarity
 
     def stop(self):
         self.running = False
+        self.stop_event.set()
         if self.heartbeat_thread:
             self.heartbeat_thread.join()
         self.shutdown_time = datetime.now()
@@ -73,10 +80,11 @@ class HealthReporter:
         self.log_info("*** Application Stopped ***")  # Added asterisks for clarity
 
     def _heartbeat_loop(self):
-        time.sleep(self.heartbeat_interval)  # Wait for the first interval before sending the first heartbeat
-        while self.running:
+        # Wait for the first interval before sending the first heartbeat
+        self.stop_event.wait(self.heartbeat_interval)
+        while not self.stop_event.is_set():
             self._send_heartbeat()
-            time.sleep(self.heartbeat_interval)
+            self.stop_event.wait(self.heartbeat_interval)
 
     def _send_heartbeat(self):
         with self.lock:
@@ -187,6 +195,15 @@ class HealthReporter:
             f"Auditable Events: {self.state_auditable_events_count}"
         )
 
-    def report_error(self, message, log_type):
+    def report_error(self, message, log_type='general'):
         with self.lock:
             self.log_error(f"{log_type} Error: {message}")
+            if 'Log dropped' in message:
+                self.dropped_logs[log_type] += 1
+                if self.dropped_logs[log_type] > self.drop_threshold:
+                    self.alert_on_dropped_logs(log_type)
+
+    def alert_on_dropped_logs(self, log_type):
+        alert_message = f"Alert: Dropped logs for {log_type} exceeded threshold of {self.drop_threshold}."
+        self.log_error(alert_message)
+        # Optionally, integrate with an alerting system here
