@@ -51,10 +51,7 @@ class LogProcessor:
         self.BEATNAME = beatname
         self.USE_TCP = use_tcp
         self.MAX_MESSAGE_LENGTH = max_message_length
-        self.syslog = self._setup_syslog()
-        if self.syslog is None:
-            logger.error(f"Failed to set up syslog connection to {self.sma_host}:{self.sma_port}")
-            # You might want to raise an exception here or implement a retry mechanism
+        self.syslog = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.message_count = 0
         self.last_send_time = time.time()
         self.health_reporter = health_reporter
@@ -71,6 +68,10 @@ class LogProcessor:
         self.tokens = self.max_messages_per_second
         self.last_refill = time.time()
         self.token_lock = threading.Lock()
+        self.logs_extracted = 0
+        self.logs_sent = 0
+        self.logs_dropped = 0
+        self.current_log_type = None  # Add this line
         self._setup_persistent_queue()
 
     def _setup_syslog(self):
@@ -115,32 +116,34 @@ class LogProcessor:
             else:
                 return None, None
 
-    def drain_queue(self, stop_event):
+    def drain_queue(self, stop_event, timeout=None):
+        start_time = time.time()
         while not stop_event.is_set():
             with self.queue_lock:
                 self.db_cursor.execute(
                     'SELECT id, log_message, log_type FROM log_queue ORDER BY id ASC LIMIT 100'
                 )
                 records = self.db_cursor.fetchall()
-                if records:
-                    ids_to_delete = []
-                    for record in records:
-                        if stop_event.is_set():
-                            logger.info("Stopping drain_queue due to shutdown signal.")
-                            break
-                        log_id, log_message, log_type = record
-                        sent = self._send_log(log_message, log_type)
-                        if not sent:
-                            logger.error(f"Failed to send log: {log_message[:100]}...")
-                            break  # Stop processing if send fails
-                        else:
-                            ids_to_delete.append((log_id,))
-                            self.health_reporter.report_syslog_sent(1, log_type)
-                    if ids_to_delete:
-                        self.db_cursor.executemany('DELETE FROM log_queue WHERE id = ?', ids_to_delete)
-                        self.db_connection.commit()
-                else:
+                if not records:
                     break
+                ids_to_delete = []
+                for record in records:
+                    if stop_event.is_set():
+                        logger.info("Stopping drain_queue due to shutdown signal.")
+                        return
+                    log_id, log_message, log_type = record
+                    sent = self._send_log(log_message, log_type)
+                    if sent:
+                        ids_to_delete.append((log_id,))
+                        self.health_reporter.report_syslog_sent(1, log_type)
+                    else:
+                        logger.error(f"Failed to send log: {log_message[:100]}...")
+                if ids_to_delete:
+                    self.db_cursor.executemany('DELETE FROM log_queue WHERE id = ?', ids_to_delete)
+                    self.db_connection.commit()
+            if timeout and (time.time() - start_time) > timeout:
+                logger.warning("Drain queue timeout reached.")
+                break
 
     def process_log_file(
         self,
@@ -177,6 +180,7 @@ class LogProcessor:
             self.send_logs(logs_to_send, log_type, stop_event)
             
             self.app_logger.info(f"Log processing completed successfully for {file_path}")
+            self.logs_extracted += len(logs_to_send)
             return True, len(logs_to_send)
         except Exception as e:
             self.app_logger.error(f"Error processing log file {file_path}: {e}")
@@ -311,22 +315,17 @@ class LogProcessor:
         
         return f"{formatted_log}|original_message={escaped_json}"
 
-    def send_logs(self, logs, log_type, stop_event: threading.Event, batch_size=100):
-        for i in range(0, len(logs), batch_size):
-            batch = logs[i:i + batch_size]
+    def send_logs(self, logs_to_send, log_type, stop_event):
+        self.current_log_type = log_type
+        for transformed_log, original_log in logs_to_send:
             if stop_event.is_set():
-                logger.info("Stopping send_logs due to shutdown signal.")
                 break
-            for transformed_log, original_log in batch:
-                if stop_event.is_set():
-                    logger.info("Stopping send_logs due to shutdown signal.")
-                    break
-                formatted_log = self.format_log_for_siem(transformed_log, original_log)
-                self.enqueue_log(formatted_log, log_type)
-            self.drain_queue(stop_event)
-            if stop_event.is_set():
-                logger.info("Stopping send_logs due to shutdown signal.")
-                break
+            formatted_log = self.format_log_for_siem(transformed_log, original_log)
+            if self.send_to_siem(formatted_log, log_type):
+                self.logs_sent += 1
+            else:
+                self.logs_dropped += 1
+        self.current_log_type = None
 
     def _send_log(self, log_line, log_type):
         max_retries = 5
@@ -334,7 +333,7 @@ class LogProcessor:
 
         for attempt in range(max_retries):
             try:
-                if self.send_to_siem(log_line):
+                if self.send_to_siem(log_line, log_type):
                     self.health_reporter.report_syslog_sent(1, log_type)
                     return True
                 else:
@@ -357,30 +356,25 @@ class LogProcessor:
             self.tokens = min(self.max_messages_per_second, self.tokens + refill_amount)
             self.last_refill = current_time
 
-    def send_to_siem(self, log_line):
-        if self.syslog is None:
-            logger.error("Syslog connection is not available")
-            return False
-
-        self._refill_tokens()
-        with self.token_lock:
-            if self.tokens >= 1:
-                self.tokens -= 1
-                try:
-                    if self.USE_TCP:
-                        self.syslog.sendall(log_line.encode() + b'\n')
-                    else:
-                        self.syslog.sendto(log_line.encode(), (self.sma_host, self.sma_port))
-                    return True
-                except Exception as e:
-                    logger.error(f"Error sending log to SIEM: {e}")
-                    # Try to re-establish the connection
-                    self.syslog = self._setup_syslog()
+    def send_to_siem(self, log_line, log_type):
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                if isinstance(log_line, str):
+                    log_line = log_line.encode('utf-8')
+                self.syslog.sendto(log_line, (self.sma_host, self.sma_port))
+                self.logs_sent += 1
+                self.health_reporter.report_syslog_sent(1, log_type)
+                return True
+            except Exception as e:
+                logger.error(f"Error sending log to SIEM: {e}")
+                if attempt < max_retries - 1:
+                    logger.info(f"Retrying... Attempt {attempt + 2} of {max_retries}")
+                    time.sleep(1)
+                else:
+                    logger.error(f"Failed to send log after {max_retries} attempts.")
+                    self.logs_dropped += 1
                     return False
-            else:
-                # Tokens exhausted, wait and retry
-                time.sleep(1 / self.max_messages_per_second)
-                return self.send_to_siem(log_line)
 
     def adjust_syslog_rate(self, logs_sent, start_time):
         current_time = time.time()
@@ -416,3 +410,16 @@ class LogProcessor:
                 logger.info("Syslog socket closed.")
             except Exception as e:
                 logger.error(f"Error closing syslog socket: {e}")
+
+    def get_stats(self):
+        return {
+            'logs_extracted': self.logs_extracted,
+            'logs_sent': self.logs_sent,
+            'logs_dropped': self.logs_dropped,
+            'logs_in_queue': self.get_queue_size()
+        }
+
+    def get_queue_size(self):
+        with self.queue_lock:
+            self.db_cursor.execute('SELECT COUNT(*) FROM log_queue')
+            return self.db_cursor.fetchone()[0]

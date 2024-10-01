@@ -94,65 +94,43 @@ class S3Manager:
         folder = f"illumio/{log_type}/"
         new_objects = []
 
-        if log_type == 'summaries':
-            # Use date-based prefixes for summaries
-            date_list = [time_window_start + timedelta(days=x) for x in range((time_window_end - time_window_start).days + 1)]
-            prefixes = [f"{folder}{date.strftime('%Y%m%d')}" for date in date_list]
-            logger.info(f"Scanning prefixes for summaries: {prefixes}")
-            try:
+        try:
+            if log_type == 'summaries':
+                # Use date-based prefixes for summaries
+                date_list = [time_window_start + timedelta(days=x) for x in range((time_window_end - time_window_start).days + 1)]
+                prefixes = [f"{folder}{date.strftime('%Y%m%d')}" for date in date_list]
+                logger.info(f"Scanning prefixes for summaries: {prefixes}")
                 for prefix in prefixes:
-                    paginator = self.s3_client.get_paginator('list_objects_v2')
-                    page_iterator = paginator.paginate(
-                        Bucket=self.s3_bucket_name,
-                        Prefix=prefix
-                    )
+                    self._list_objects(prefix, new_objects, processed_keys, time_window_start, time_window_end, batch_size)
+                    if len(new_objects) >= batch_size:
+                        break
+            else:
+                # Scan entire folder for auditable_events
+                logger.info(f"Scanning folder for auditable_events: {folder}")
+                self._list_objects(folder, new_objects, processed_keys, time_window_start, time_window_end, batch_size)
 
-                    for page in page_iterator:
-                        if 'Contents' in page:
-                            for obj in page['Contents']:
-                                # Filter objects by time window and whether they have been processed
-                                obj_last_modified = obj['LastModified'].replace(tzinfo=pytz.UTC)
-                                if obj['Key'] not in processed_keys[log_type] and \
-                                   time_window_start <= obj_last_modified <= time_window_end:
-                                    new_objects.append(obj)
-                                    if len(new_objects) >= batch_size:
-                                        break
-                            if len(new_objects) >= batch_size:
-                                break
-            except Exception as e:
-                logger.error(f"Error listing objects for {folder}: {e}")
-                # Continue processing even if an error occurs
-            finally:
-                logger.debug(f"Finished scanning for new {log_type} logs.")
-        else:
-            # Scan entire folder for auditable_events
-            logger.info(f"Scanning folder for auditable_events: {folder}")
-            try:
-                paginator = self.s3_client.get_paginator('list_objects_v2')
-                page_iterator = paginator.paginate(
-                    Bucket=self.s3_bucket_name,
-                    Prefix=folder
-                )
+        except Exception as e:
+            logger.error(f"Error in get_new_s3_objects for {log_type}: {e}")
 
-                for page in page_iterator:
-                    if 'Contents' in page:
-                        for obj in page['Contents']:
-                            # Filter by time window and processed keys
-                            obj_last_modified = obj['LastModified'].replace(tzinfo=pytz.UTC)
-                            if obj['Key'] not in processed_keys[log_type] and \
-                               time_window_start <= obj_last_modified <= time_window_end:
-                                new_objects.append(obj)
-                                if len(new_objects) >= batch_size:
-                                    break
-                        if len(new_objects) >= batch_size:
-                            break
-            except Exception as e:
-                logger.error(f"Error listing objects in folder {folder}: {e}")
-                # Continue processing even if an error occurs
-            finally:
-                logger.debug(f"Finished scanning for new {log_type} logs.")
-
+        logger.info(f"Found {len(new_objects)} new {log_type} objects")
         return new_objects
+
+    def _list_objects(self, prefix, new_objects, processed_keys, time_window_start, time_window_end, batch_size):
+        try:
+            paginator = self.s3_client.get_paginator('list_objects_v2')
+            page_iterator = paginator.paginate(Bucket=self.s3_bucket_name, Prefix=prefix)
+
+            for page in page_iterator:
+                if 'Contents' in page:
+                    for obj in page['Contents']:
+                        obj_last_modified = obj['LastModified'].replace(tzinfo=pytz.UTC)
+                        if (obj['Key'] not in processed_keys and
+                            time_window_start <= obj_last_modified <= time_window_end):
+                            new_objects.append(obj)
+                            if len(new_objects) >= batch_size:
+                                return
+        except Exception as e:
+            logger.error(f"Error listing objects for prefix {prefix}: {e}")
 
     def save_state(self, processed_keys):
         state_data = {

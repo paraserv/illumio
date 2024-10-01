@@ -53,6 +53,7 @@ class HealthReporter:
         self.drop_threshold = 100  # Threshold for alerts
 
         self.stop_event = threading.Event()
+        self.log_processor = None
 
     def start(self):
         if not self.running:
@@ -207,3 +208,25 @@ class HealthReporter:
         alert_message = f"Alert: Dropped logs for {log_type} exceeded threshold of {self.drop_threshold}."
         self.log_error(alert_message)
         # Optionally, integrate with an alerting system here
+
+    def report_heartbeat(self):
+        with self.lock:
+            uptime = datetime.now() - self.start_time
+            self.log_info(f"Heartbeat: Uptime: {self._format_duration(uptime)}")
+            self.log_statistics()
+            if self.log_processor:
+                log_processor_stats = self.log_processor.get_stats()
+                logger.info(f"Health Report: Log Processor Stats: {log_processor_stats}")
+
+    def report_summary(self):
+        with self.lock:
+            uptime = datetime.now() - self.start_time
+            self.log_info(f"Summary: Uptime: {self._format_duration(uptime)}")
+            self.log_statistics()
+            self.last_summary_time = datetime.now()
+            if self.log_processor:
+                log_processor_stats = self.log_processor.get_stats()
+                logger.info(f"Health Report: Log Processor Stats: {log_processor_stats}")
+
+    def set_log_processor(self, log_processor):
+        self.log_processor = log_processor
