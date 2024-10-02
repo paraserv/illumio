@@ -14,6 +14,7 @@ import configparser
 import sqlite3
 import logging
 import queue
+from datetime import datetime, timedelta
 
 # Third-party imports
 import socket
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 class TokenBucket:
     def __init__(self, rate, capacity=None):
+        self.current_mps = 0
         self.rate = rate
         self.capacity = capacity or rate
         self.tokens = self.capacity
@@ -100,6 +102,10 @@ class LogProcessor:
         self.sample_log_interval = config.SAMPLE_LOG_INTERVAL
         self.sample_log_length = config.SAMPLE_LOG_LENGTH
         self.last_sample_log_time = 0
+        self.last_mps_check = time.time()
+        self.messages_sent_since_last_check = 0
+        self.current_mps = self.min_messages_per_second  # Start with the minimum rate
+        self.stop_event = threading.Event()
 
     def _setup_syslog(self):
         try:
@@ -390,39 +396,51 @@ class LogProcessor:
             
             self.syslog.sendto(log_line, (self.sma_host, self.sma_port))
             self.logs_sent += 1
+            self.messages_sent_since_last_check += 1
             self.health_reporter.report_syslog_sent(1, log_type)
             
+            self._update_mps()
+            
             if self.logs_sent % 1000 == 0:
-                logger.info(f"[SYSLOG] Sent {self.logs_sent} logs to SIEM")
+                logger.info(f"[SYSLOG] Sent {self.logs_sent} logs to SIEM. Current MPS: {self.current_mps:.2f}")
             
             return True
         except Exception as e:
             logger.error(f"[ERROR] Sending log to SIEM: {str(e)[:100]}...")
             return False
 
+    def _update_mps(self):
+        now = time.time()
+        time_diff = now - self.last_mps_check
+        if time_diff >= 60:  # Update MPS every minute
+            self.current_mps = self.messages_sent_since_last_check / time_diff
+            logger.info(f"[MPS] Current messages per second: {self.current_mps:.2f}")
+            self.last_mps_check = now
+            self.messages_sent_since_last_check = 0
+
     def _process_queue(self):
         logger.info("Starting queue processing thread")
-        while True:
+        while not self.stop_event.is_set():
             try:
+                start_time = time.time()
+                logs_sent = 0
+                while logs_sent < self.current_mps and not self.log_queue.empty():
+                    log_line, log_type = self.log_queue.get(block=False)
+                    if self.send_to_siem(log_line, log_type):
+                        self.log_queue.task_done()
+                        logs_sent += 1
+                    else:
+                        self.log_queue.put((log_line, log_type))
+                
+                elapsed_time = time.time() - start_time
+                self.adjust_syslog_rate(logs_sent, elapsed_time)
+
                 if self.get_queue_size() > self.queue_size_threshold:
                     logger.warning(f"Queue size ({self.get_queue_size()}) exceeds threshold. Pausing syslog sending.")
                     time.sleep(5)  # Wait for 5 seconds before checking again
-                    continue
 
-                log_line, log_type = self.log_queue.get(timeout=1)
-                logger.debug(f"Processing log from queue: {log_line[:100]}...")
-                if self.send_to_siem(log_line, log_type):
-                    self.log_queue.task_done()
-                    with self.stats_lock:
-                        self.stats['logs_sent'] += 1
-                    logger.debug(f"Successfully sent log to SIEM. Queue size: {self.get_queue_size()}")
-                else:
-                    logger.warning(f"Failed to send log to SIEM. Re-queueing: {log_line[:100]}...")
-                    self.log_queue.put((log_line, log_type))
-                    with self.stats_lock:
-                        self.stats['logs_failed'] += 1
             except queue.Empty:
-                continue
+                time.sleep(0.1)  # Short sleep to prevent tight looping
             except Exception as e:
                 logger.error(f"Error processing queue: {e}")
 
@@ -439,7 +457,7 @@ class LogProcessor:
             self.tokens -= 1
             return True
 
-    def adjust_syslog_rate(self, logs_sent, start_time):
+    def adjust_syslog_rate(self, logs_sent, elapsed_time):
         if not self.enable_dynamic_syslog_rate:
             return
 
@@ -447,19 +465,20 @@ class LogProcessor:
         if current_time - self.last_adjustment_time < self.adjustment_interval:
             return  # Don't adjust if less than the adjustment interval has passed
 
-        elapsed_time = current_time - start_time
-        current_rate = logs_sent / elapsed_time
+        if elapsed_time > 0:
+            current_rate = logs_sent / elapsed_time
+        else:
+            current_rate = self.current_mps
 
         if current_rate < self.max_messages_per_second * 0.8:  # If we're sending at less than 80% capacity
-            new_rate = min(self.max_messages_per_second * 1.1, self.config.MAX_MESSAGES_PER_SECOND)
+            new_rate = min(current_rate * 1.1, self.max_messages_per_second)
         elif current_rate > self.max_messages_per_second:
-            new_rate = max(self.max_messages_per_second * 0.9, self.min_messages_per_second)
+            new_rate = max(current_rate * 0.9, self.min_messages_per_second)
         else:
-            return  # No adjustment needed
+            new_rate = current_rate
 
-        if new_rate != self.max_messages_per_second:
-            self.max_messages_per_second = round(new_rate)
-            logger.info(f"[ADJUSTMENT] Syslog sending rate: {self.max_messages_per_second} messages/s")
+        self.current_mps = max(new_rate, self.min_messages_per_second)  # Ensure we never go below the minimum
+        logger.info(f"[ADJUSTMENT] Syslog sending rate adjusted to: {self.current_mps:.2f} messages/s. Current actual MPS: {current_rate:.2f}")
         
         self.last_adjustment_time = current_time
 
@@ -480,21 +499,11 @@ class LogProcessor:
     def get_queue_size(self):
         return self.log_queue.qsize()
 
-    def process_queue(self, stop_event):
-        start_time = time.time()
-        logs_sent = 0
-        while not self.log_queue.empty() and not stop_event.is_set():
-            try:
-                log_line, log_type = self.log_queue.get(block=False)
-                if self.send_to_siem(log_line, log_type):
-                    logs_sent += 1
-                self.log_queue.task_done()
-            except queue.Empty:
-                break
-
-        if logs_sent > 0:
-            self.adjust_syslog_rate(logs_sent, start_time)
+    def stop_processing(self):
+        self.stop_event.set()
+        self.processing_thread.join()
+        logger.info("Queue processing stopped")
 
     def log_queue_stats(self):
         stats = self.get_stats()
-        logger.info(f"[QUEUE_STATS] Size: {self.get_queue_size()}, Queued: {stats['logs_queued']}, Sent: {stats['logs_sent']}, Failed: {stats['logs_failed']}")
+        logger.info(f"[QUEUE_STATS] Size: {self.get_queue_size()}, Queued: {stats['logs_queued']}, Sent: {stats['logs_sent']}, Failed: {stats['logs_failed']}, Current MPS: {self.current_mps:.2f}")

@@ -89,5 +89,11 @@ class Config:
         self.APP_DIR = str(Path(__file__).parent)
         self.ENABLE_HEALTH_REPORTER = self._config.getboolean('HealthReporting', 'enable_health_reporter', fallback=True)
         
+        # Add this line
+        self.HEALTH_REPORT_LOG_FILE = os.path.join(self.LOG_FOLDER, 'health_report.log')
+
+        # Add this line
+        self.TIME_WINDOW_HOURS = self._config.getfloat('Processing', 'TIME_WINDOW_HOURS', fallback=8.0)
+
         if not self.SMA_HOST:
             raise ValueError("SMA_HOST is not set in settings.ini")

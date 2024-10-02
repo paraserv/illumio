@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import configparser
 import json
+import os
 
 # Local application imports
 from logger_config import get_logger
@@ -154,6 +155,7 @@ class HealthReporter:
             return
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_message = f"{timestamp} - INFO - {message}"
+        os.makedirs(os.path.dirname(self.health_log_file), exist_ok=True)
         with open(self.health_log_file, 'a') as f:
             f.write(f"{log_message}\n")
         logger.info(f"Health Report: {message}")
@@ -163,6 +165,7 @@ class HealthReporter:
             return
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_message = f"{timestamp} - ERROR - {message}"
+        os.makedirs(os.path.dirname(self.health_log_file), exist_ok=True)
         with open(self.health_log_file, 'a') as f:
             f.write(f"{log_message}\n")
         logger.error(f"Health Report: {message}")
@@ -286,29 +289,21 @@ class HealthReporter:
         with self.lock:
             report = {
                 "timestamp": datetime.now().isoformat(),
-                "uptime": self._format_duration(datetime.now() - self.start_time),
+                "uptime": str(datetime.now() - self.start_time),
                 "summary_logs": {
                     "gz_files_processed": self.gz_files_processed['summaries'],
                     "logs_extracted": self.logs_extracted['summaries'],
-                    "syslog_sent_total": self.syslog_messages_sent['summaries'],
-                    "syslog_sent_since_last": self.summary_logs_sent_since_last_report
+                    "syslog_messages_sent": self.syslog_messages_sent['summaries']
                 },
                 "audit_logs": {
                     "gz_files_processed": self.gz_files_processed['auditable_events'],
                     "logs_extracted": self.logs_extracted['auditable_events'],
-                    "syslog_sent_total": self.syslog_messages_sent['auditable_events'],
-                    "syslog_sent_since_last": self.audit_logs_sent_since_last_report
+                    "syslog_messages_sent": self.syslog_messages_sent['auditable_events']
                 },
-                "queue_stats": self.log_processor.get_stats() if self.log_processor else {},
-                "s3_ingestion_rate": self.s3_ingestion_rate,
-                "s3_operations": self.s3_stats
+                "s3_operations": self.s3_stats,
+                "s3_ingestion_rate": self.s3_ingestion_rate
             }
-            
             self._write_to_health_log(json.dumps(report, indent=2))
-            
-            # Reset counters
-            self.summary_logs_sent_since_last_report = 0
-            self.audit_logs_sent_since_last_report = 0
 
     def _write_to_health_log(self, message):
         with open(self.health_log_file, 'a') as f:

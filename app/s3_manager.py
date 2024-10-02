@@ -75,6 +75,9 @@ class S3Manager:
         self.MAX_TIMEFRAME = settings_config.getfloat('Processing', 'MAX_TIMEFRAME', fallback=24.0)
         self.log_timeframe = config.LOG_TIMEFRAME
 
+        self.config = config  # Store the config object
+        self.time_window_hours = config.TIME_WINDOW_HOURS
+
         self.last_ingestion_check = datetime.now(pytz.UTC)
         self.last_ingestion_count = 0
         self.total_log_entries = 0
@@ -117,20 +120,19 @@ class S3Manager:
             logger.info(f"Pausing downloads. Current queue size: {current_queue_size}")
             return []
 
-        if self.current_download:
-            if not self.download_complete.is_set():
-                logger.info("Waiting for current download to complete")
-                return []
-            self.current_download = None
-            self.download_complete.clear()
-
         folder = f"illumio/{log_type}/"
         new_objects = []
 
         try:
+            # Use the TIME_WINDOW_HOURS setting to determine the start time
+            time_window_start = datetime.now(pytz.UTC) - timedelta(hours=self.config.TIME_WINDOW_HOURS)
+            time_window_end = datetime.now(pytz.UTC)
+
+            logger.info(f"Scanning S3 for {log_type} from {time_window_start} to {time_window_end}")
+
             if log_type == 'summaries':
                 # Use date-based prefixes for summaries
-                date_list = [time_window_start + timedelta(days=x) for x in range((time_window_end - time_window_start).days + 1)]
+                date_list = [time_window_start.date() + timedelta(days=x) for x in range((time_window_end.date() - time_window_start.date()).days + 1)]
                 prefixes = [f"{folder}{date.strftime('%Y%m%d')}" for date in date_list]
                 logger.info(f"Scanning prefixes for summaries: {prefixes}")
                 for prefix in prefixes:
@@ -140,15 +142,16 @@ class S3Manager:
             else:
                 self._scan_prefix(folder, time_window_start, time_window_end, new_objects, batch_size, log_type)
 
+            logger.info(f"Found {len(new_objects)} new objects for {log_type}. Time window: {time_window_start} to {time_window_end}")
+
             self.s3_stats['files_discovered'] += len(new_objects)
+            self.update_s3_stats()
+
+            return new_objects[:batch_size]  # Return up to batch_size number of objects
         except Exception as e:
             logger.error(f"Error listing objects: {e}")
+            logger.exception("Detailed error information:")
         
-        self.update_s3_stats()
-
-        if new_objects:
-            self.current_download = new_objects[0]
-            return [self.current_download]  # Return the full S3 object
         return []
 
     def _scan_prefix(self, prefix, time_window_start, time_window_end, new_objects, batch_size, log_type):
@@ -161,8 +164,13 @@ class S3Manager:
                         if (obj['Key'] not in self.processed_keys[log_type] and
                             time_window_start <= obj_last_modified <= time_window_end):
                             new_objects.append(obj)
-                            if len(new_objects) >= batch_size:
-                                return
+                            logger.debug(f"Found new object: {obj['Key']}, Last Modified: {obj_last_modified}")
+                        else:
+                            logger.debug(f"Skipped object: {obj['Key']}, Last Modified: {obj_last_modified}, Already Processed: {obj['Key'] in self.processed_keys[log_type]}")
+                        if len(new_objects) >= batch_size:
+                            return
+            else:
+                logger.info(f"No contents found for prefix: {prefix}")
 
     def save_state(self):
         if not self.state_file:
@@ -243,7 +251,6 @@ class S3Manager:
             logger.debug(f"  Uncompressed size: {dest_path.stat().st_size} bytes")
             logger.debug(f"  Logs extracted: {logs_extracted}")
 
-            self.download_complete.set()
             self.s3_stats['files_downloaded'] += 1
             self.s3_stats['files_processed'] += 1
             self.s3_stats['logs_extracted'] += logs_extracted
@@ -280,7 +287,9 @@ class S3Manager:
                 f"Processed: {self.s3_stats['files_processed']}, "
                 f"Logs extracted: {self.s3_stats['logs_extracted']}"
             )
-            self.health_reporter.log_s3_stats(stats_message)
+            try:
+                self.health_reporter.log_s3_stats(stats_message)
+            except Exception as e:
+                logger.error(f"Failed to log S3 stats: {e}")
             self.last_stats_update = current_time
-            return self.s3_stats.copy()
-        return None
+        return self.s3_stats.copy()
