@@ -10,10 +10,9 @@ import threading
 import json
 import time
 import signal
-import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import logging
 import concurrent.futures
 
@@ -34,21 +33,20 @@ logger = get_logger('illumio_s3_processor')
 
 # Global variables
 executor = None
-processed_keys = {'summaries': {}, 'auditable_events': {}}
-stop_event = threading.Event()  # Shared stop_event across modules
+stop_event = threading.Event()
 
 def signal_handler(signum, frame):
     logger.info("Received termination signal. Setting stop event.")
     stop_event.set()
 
-def shutdown():
-    global executor, log_processor, health_reporter
+def shutdown(s3_manager, log_processor, health_reporter):
+    global executor
     logger.info("Initiating shutdown...")
 
     if executor:
         logger.info("Shutting down ThreadPoolExecutor...")
         executor.shutdown(wait=False)
-        for _ in range(5):  # Wait up to 5 seconds for threads to terminate
+        for _ in range(5):
             if all(not thread.is_alive() for thread in executor._threads):
                 break
             time.sleep(1)
@@ -59,19 +57,55 @@ def shutdown():
         logger.info("Draining log queue...")
         log_processor.drain_queue(stop_event, timeout=5)
         logger.info("Log queue drain attempt completed.")
-
         logger.info("Closing syslog connection...")
         log_processor.close()
         logger.info("Syslog connection closed.")
 
-    if health_reporter and health_reporter.running:
+    if health_reporter:
         health_reporter.stop()
         logger.info("Health reporter stopped.")
 
+    if s3_manager:
+        s3_manager.save_state()
+        logger.info("S3 Manager state saved.")
+
     logger.info("Shutdown complete.")
 
+def handle_log_file(s3_object, s3_manager, log_processor, log_type, stop_event, health_reporter):
+    local_file, logs_extracted = s3_manager.download_and_extract(s3_object['Key'], stop_event)
+    if local_file is None:
+        logger.warning(f"Failed to download or extract {s3_object['Key']}")
+        return False, 0
+
+    result, logs_processed = log_processor.process_log_file(local_file, log_type, stop_event)
+    
+    try:
+        os.remove(local_file)
+    except Exception as e:
+        logger.error(f"Error removing temporary file {local_file}: {e}")
+
+    if result:
+        health_reporter.report_gz_file_processed(log_type)
+        health_reporter.report_logs_extracted(logs_extracted, log_type)
+
+    return result, logs_processed
+
+def monitor_queue(log_processor, config, stop_event):
+    while not stop_event.is_set():
+        current_queue_size = log_processor.get_queue_size()
+        if current_queue_size >= config.QUEUE_SIZE_THRESHOLD:
+            logger.warning(f"Queue size ({current_queue_size}) exceeded threshold ({config.QUEUE_SIZE_THRESHOLD})")
+        time.sleep(config.QUEUE_MONITOR_INTERVAL)
+
+def update_health_reporter_s3_stats(s3_manager, health_reporter, stop_event):
+    while not stop_event.is_set():
+        stats = s3_manager.update_s3_stats()
+        if stats:
+            health_reporter.update_s3_stats(stats)
+        time.sleep(60)  # Update every minute
+
 def main():
-    global executor, processed_keys, stop_event, log_processor, health_reporter
+    global executor
 
     # Register signal handlers
     signal.signal(signal.SIGINT, signal_handler)
@@ -88,29 +122,17 @@ def main():
     download_folder.mkdir(parents=True, exist_ok=True)
     logger.info(f"Ensuring download folder exists: {download_folder}")
 
+    # Ensure the log folder exists
+    log_folder = script_dir / config.LOG_FOLDER
+    log_folder.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Ensuring log folder exists: {log_folder}")
+
     # Initialize HealthReporter
-    health_reporter = HealthReporter(
-        heartbeat_interval=config.HEARTBEAT_INTERVAL,
-        summary_interval=config.SUMMARY_INTERVAL,
-        log_folder=script_dir / config.LOG_FOLDER
-    )
+    health_reporter = HealthReporter(config)
     health_reporter.start()
 
     # Initialize LogProcessor
-    log_processor = LogProcessor(
-        sma_host=config.SMA_HOST,
-        sma_port=config.SMA_PORT,
-        max_messages_per_second=config.MAX_MESSAGES_PER_SECOND,
-        min_messages_per_second=config.MIN_MESSAGES_PER_SECOND,
-        enable_dynamic_syslog_rate=config.ENABLE_DYNAMIC_SYSLOG_RATE,
-        beatname=config.BEATNAME,
-        use_tcp=config.USE_TCP,
-        max_message_length=config.MAX_MESSAGE_LENGTH,
-        health_reporter=health_reporter
-    )
-
-    # Set log_processor in health_reporter
-    health_reporter.set_log_processor(log_processor)
+    log_processor = LogProcessor(config, health_reporter)
 
     # Initialize S3Manager
     s3_manager = S3Manager(
@@ -122,117 +144,80 @@ def main():
         health_reporter=health_reporter,
         max_pool_connections=config.MAX_POOL_CONNECTIONS,
         state_file=state_file,
-        downloaded_files_folder=download_folder
+        downloaded_files_folder=download_folder,
+        config=config
     )
-
-    # Load the previous state
-    processed_keys = s3_manager.load_state(state_file)
 
     # Initialize ThreadPoolExecutor
     executor = ThreadPoolExecutor(max_workers=config.MAX_WORKERS)
 
+    queue_monitor_thread = threading.Thread(target=monitor_queue, args=(log_processor, config, stop_event))
+    queue_monitor_thread.start()
+
+    s3_stats_thread = threading.Thread(target=update_health_reporter_s3_stats, args=(s3_manager, health_reporter, stop_event))
+    s3_stats_thread.start()
+
+    # Initialize last_stats_log
+    last_stats_log = time.time()
+
+    last_detailed_report_time = time.time()
+    detailed_report_interval = 300  # Generate detailed report every 5 minutes
+
     try:
         while not stop_event.is_set():
-            logger.debug("Main loop iteration started.")
-            try:
-                # Check for new logs and process them
-                for log_type in ['auditable_events', 'summaries']:
-                    if stop_event.is_set():
-                        break
+            current_queue_size = log_processor.get_queue_size()
+            if current_queue_size >= config.QUEUE_SIZE_THRESHOLD:
+                logger.warning(f"Queue size ({current_queue_size}) exceeded threshold ({config.QUEUE_SIZE_THRESHOLD}). Pausing download and extraction.")
+                time.sleep(config.POLL_INTERVAL)
+                log_processor.process_queue(stop_event)
+                continue
 
-                    time_window_start = datetime.now(pytz.UTC) - timedelta(minutes=config.MINUTES)
-                    time_window_end = datetime.now(pytz.UTC)
-
-                    new_s3_objects = s3_manager.get_new_s3_objects(
-                        log_type, processed_keys[log_type], time_window_start, time_window_end, config.BATCH_SIZE
-                    )
-
-                    futures = []
-                    for s3_object in new_s3_objects:
-                        if stop_event.is_set():
-                            break
-                        future = executor.submit(
-                            handle_log_file_with_retry,
-                            s3_object,
-                            s3_manager,
-                            log_processor,
-                            processed_keys,
-                            log_type,
-                            stop_event
-                        )
-                        futures.append((future, s3_object, log_type))
-
-                    for future, s3_object, log_type in futures:
-                        if stop_event.is_set():
-                            future.cancel()
-                            continue
-                        try:
-                            result = future.result(timeout=60)
-                            if result:
-                                s3_manager.update_and_save_state(processed_keys, log_type, s3_object['Key'])
-                                logger.info(f"Successfully processed: {s3_object['Key']}, Type: {log_type}")
-                            else:
-                                logger.error(f"Failed to process: {s3_object['Key']}, Type: {log_type}")
-                        except concurrent.futures.TimeoutError:
-                            logger.warning(f"Timeout while processing: {s3_object['Key']}, Type: {log_type}")
-                            future.cancel()
-                        except Exception as e:
-                            logger.exception(f"Exception processing {s3_object['Key']}: {e}")
-                            health_reporter.report_error(str(e), log_type)
-
+            for log_type in ['auditable_events', 'summaries']:
                 if stop_event.is_set():
                     break
 
-            except Exception as e:
-                logger.exception(f"Unhandled exception in main loop: {e}")
-                health_reporter.report_error(str(e), 'general')
-            finally:
-                logger.debug("Main loop iteration ended.")
-                if not stop_event.is_set():
-                    stop_event.wait(timeout=config.POLL_INTERVAL)
+                time_window_start = datetime.now(pytz.UTC) - timedelta(minutes=config.MINUTES)
+                time_window_end = datetime.now(pytz.UTC)
 
-    except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received. Exiting.")
+                new_s3_objects = s3_manager.get_new_s3_objects(
+                    log_type, time_window_start, time_window_end, 1, current_queue_size
+                )
+
+                if not new_s3_objects:
+                    logger.info(f"No new {log_type} objects to process or queue is full. Skipping.")
+                    continue
+
+                for s3_object in new_s3_objects:
+                    result, logs_extracted = handle_log_file(s3_object, s3_manager, log_processor, log_type, stop_event, health_reporter)
+                    if result:
+                        s3_manager.update_and_save_state(log_type, s3_object)
+                        logger.info(f"Successfully processed: {s3_object['Key']}, Type: {log_type}, Logs extracted: {logs_extracted}")
+                    else:
+                        logger.warning(f"Failed to process: {s3_object['Key']}, Type: {log_type}, Logs extracted: {logs_extracted}")
+
+                # Process the queue after each file to maintain balance
+                log_processor.process_queue(stop_event)
+
+            # Log queue stats every 60 seconds
+            if time.time() - last_stats_log > 60:
+                log_processor.log_queue_stats()
+                last_stats_log = time.time()
+
+            # Generate detailed report periodically
+            if time.time() - last_detailed_report_time > config.DETAILED_REPORT_INTERVAL:
+                health_reporter.generate_detailed_report()
+                last_detailed_report_time = time.time()
+
+            # Sleep before the next iteration
+            time.sleep(config.POLL_INTERVAL)
+
+    except Exception as e:
+        logger.exception(f"Unhandled exception in main loop: {e}")
     finally:
         stop_event.set()
-        shutdown()
+        s3_stats_thread.join()  # Wait for the S3 stats thread to finish
+        shutdown(s3_manager, log_processor, health_reporter)
         logger.info("Application has been terminated.")
-
-def handle_log_file_with_retry(
-    s3_object, s3_manager, log_processor,
-    processed_keys, log_type, stop_event
-):
-    if stop_event.is_set():
-        return False
-
-    local_file = s3_manager.download_and_extract(s3_object, stop_event)
-    if local_file is None:
-        return False
-
-    @retry(wait=wait_exponential(min=1, max=5), stop=stop_after_attempt(3))
-    def process():
-        if stop_event.is_set():
-            return False
-        logger.debug(f"Starting processing of {s3_object['Key']} for {log_type}")
-        start_time = time.time()
-        success, logs_extracted = log_processor.process_log_file(local_file, log_type, stop_event)
-        end_time = time.time()
-        if success:
-            processing_duration = end_time - start_time
-            logger.info(f"Processed {local_file} in {processing_duration:.2f} seconds")
-            health_reporter.report_gz_file_processed(log_type)
-            logger.debug(f"Finished processing of {s3_object['Key']} for {log_type}")
-            return True
-        else:
-            raise Exception(f"Failed to process log file {local_file}")
-
-    try:
-        return process()
-    except Exception as e:
-        if not stop_event.is_set():
-            logger.error(f"Error processing {s3_object['Key']}: {e}")
-            health_reporter.report_error(str(e), log_type)
-        return False
 
 if __name__ == '__main__':
     main()
