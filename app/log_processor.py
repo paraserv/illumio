@@ -169,6 +169,11 @@ class LogProcessor:
             return self.db_cursor.fetchone()[0]
 
     def process_queue(self):
+        logs_sent = 0
+        start_time = time.time()
+        last_log_time = time.time()
+        log_interval = 5  # Log every 5 seconds
+
         while not self.stop_event.is_set():
             if self.token_bucket.consume():
                 log_line, log_type = self.dequeue_log()
@@ -177,6 +182,7 @@ class LogProcessor:
                     with self.stats_lock:
                         if success:
                             self.stats['logs_sent'] += 1
+                            logs_sent += 1
                         else:
                             self.stats['logs_failed'] += 1
                             self.enqueue_log(log_line, log_type)  # Re-queue failed logs
@@ -184,6 +190,19 @@ class LogProcessor:
                     time.sleep(self.config.QUEUE_EMPTY_SLEEP_TIME)
             else:
                 time.sleep(self.config.RATE_LIMIT_SLEEP_TIME)
+            
+            current_time = time.time()
+            elapsed_time = current_time - start_time
+            
+            # Log progress every 5 seconds
+            if current_time - last_log_time >= log_interval:
+                mps = logs_sent / elapsed_time if elapsed_time > 0 else 0
+                backlog = self.get_queue_size()
+                logger.info(f"[SYSLOG_PROGRESS] Sent {logs_sent} logs in {elapsed_time:.2f} seconds. "
+                            f"Current MPS: {mps:.2f}, Backlog: {backlog} logs")
+                logs_sent = 0
+                start_time = current_time
+                last_log_time = current_time
 
     def _send_log(self, log_line, log_type):
         max_retries = 5
@@ -313,7 +332,7 @@ class LogProcessor:
                         transformed_log = self.transform_log_based_on_policy(log_entry_dict, log_type)
                         formatted_log = self.format_log_for_siem(transformed_log, log_entry_dict)
                         
-                        # Enqueue the log instead of sending directly
+                        # Enqueue the log
                         self.enqueue_log(formatted_log, log_type)
                         logs_enqueued += 1
                     except json.JSONDecodeError:
