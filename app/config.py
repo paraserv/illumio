@@ -40,9 +40,14 @@ class Config:
         self.MAX_POOL_CONNECTIONS = self._config.getint('S3', 'MAX_POOL_CONNECTIONS', fallback=10)
         
         # Paths
-        self.STATE_FILE = self._config.get('Paths', 'STATE_FILE', fallback='state.json')
-        self.DOWNLOADED_FILES_FOLDER = self._config.get('Paths', 'DOWNLOADED_FILES_FOLDER', fallback='illumio')
-        self.LOG_FOLDER = self._config.get('Paths', 'LOG_FOLDER', fallback='logs')
+        self.APP_DIR = Path(__file__).parent
+        self.STATE_DIR = self.APP_DIR / 'state'
+        self.STATE_DIR.mkdir(parents=True, exist_ok=True)  # Ensure STATE_DIR exists
+        self.STATE_FILE = self.STATE_DIR / 'state.json'
+        self.LOG_QUEUE_DB = self.STATE_DIR / 'log_queue.db'
+        self.DOWNLOADED_FILES_FOLDER = self.APP_DIR / self._config.get('Paths', 'DOWNLOADED_FILES_FOLDER', fallback='illumio')
+        self.LOG_FOLDER = self.APP_DIR / self._config.get('Paths', 'LOG_FOLDER', fallback='logs')
+        self.HEALTH_REPORT_LOG_FILE = self.LOG_FOLDER / 'health_report.log'
         
         # Health Reporting
         self.HEARTBEAT_INTERVAL = self._config.getfloat('HealthReporting', 'HEARTBEAT_INTERVAL', fallback=15.0)
@@ -86,7 +91,6 @@ class Config:
         self.DETAILED_REPORT_INTERVAL = self._config.getint('DetailedReporting', 'REPORT_INTERVAL', fallback=300)
 
         # Add these lines
-        self.APP_DIR = str(Path(__file__).parent)
         self.ENABLE_HEALTH_REPORTER = self._config.getboolean('HealthReporting', 'enable_health_reporter', fallback=True)
         
         # Add this line
@@ -97,3 +101,9 @@ class Config:
 
         if not self.SMA_HOST:
             raise ValueError("SMA_HOST is not set in settings.ini")
+
+        # Add this line towards the end of the method
+        self.SHUTDOWN_TIMEOUT = self._config.getint('Processing', 'SHUTDOWN_TIMEOUT', fallback=30)
+
+        # Add this line for queue size threshold
+        self.QUEUE_SIZE_THRESHOLD = int(os.getenv('QUEUE_SIZE_THRESHOLD', 1000))  # Default to 1000 if not set

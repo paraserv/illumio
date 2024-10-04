@@ -14,14 +14,20 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import configparser
 import tempfile
+from contextlib import contextmanager
+import logging
+import traceback
 
 # Third-party imports
 import boto3
 import pytz
 from botocore.config import Config as BotoConfig
+from botocore.exceptions import ClientError, ConnectionError, NoCredentialsError, EndpointConnectionError
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 # Local application imports
 from logger_config import get_logger
+from config import Config
 
 # Typing imports
 from typing import List, Dict, Any
@@ -40,14 +46,16 @@ class S3Manager:
         max_pool_connections,
         state_file,
         downloaded_files_folder,
-        config
+        config: Config,
+        stop_event: threading.Event
     ):
         self.s3_bucket_name = s3_bucket_name
         self.minutes = minutes
         self.max_files_per_folder = max_files_per_folder
         self.health_reporter = health_reporter
-        self.state_file = state_file
-        self.processed_keys = self.load_state(state_file)
+        self.state_file = Path(state_file)
+        self.processed_keys = {'auditable_events': {}, 'summaries': {}}
+        self.load_state()
 
         boto_config = BotoConfig(
             max_pool_connections=max_pool_connections,
@@ -61,7 +69,7 @@ class S3Manager:
         self.s3 = self.session.client('s3', config=boto_config)
 
         self.queue_size_threshold = config.QUEUE_SIZE_THRESHOLD
-        self.downloaded_files_folder = Path(downloaded_files_folder)
+        self.downloaded_files_folder = Path(config.STATE_DIR) / 'downloads'
         self.downloaded_files_folder.mkdir(parents=True, exist_ok=True)
 
         # Load settings from settings.ini
@@ -106,6 +114,35 @@ class S3Manager:
         }
         self.last_stats_update = time.time()
 
+        self.MINUTES = minutes
+        self.MAX_FILES_PER_FOLDER = max_files_per_folder
+        self.stop_event = stop_event
+
+        logger.info(f"Processing S3 logs with settings: MINUTES={self.MINUTES}, MAX_FILES_PER_FOLDER={self.MAX_FILES_PER_FOLDER}")
+
+        self.current_operation = None
+        self.shutdown_event = threading.Event()
+
+    @contextmanager
+    def s3_operation(self, operation_name):
+        self.current_operation = operation_name
+        start_time = time.time()
+        try:
+            yield
+        finally:
+            duration = time.time() - start_time
+            logger.info(f"S3 operation '{operation_name}' completed in {duration:.2f} seconds")
+            self.current_operation = None
+            self.shutdown_event.set()  # Signal that the operation is complete
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+    def _s3_operation_with_retry(self, operation, *args, **kwargs):
+        try:
+            return operation(*args, **kwargs)
+        except (ClientError, ConnectionError) as e:
+            logger.warning(f"S3 operation failed: {e}. Retrying...")
+            raise
+
     def update_ingestion_rate(self, new_logs_count):
         current_time = time.time()
         time_diff = current_time - self.last_ingestion_time
@@ -115,62 +152,95 @@ class S3Manager:
             self.last_ingestion_count = new_logs_count
         return self.current_ingestion_rate
 
-    def get_new_s3_objects(self, log_type, time_window_start, time_window_end, batch_size, current_queue_size):
-        if current_queue_size >= self.queue_size_threshold:
-            logger.info(f"Pausing downloads. Current queue size: {current_queue_size}")
-            return []
-
-        folder = f"illumio/{log_type}/"
+    def get_new_s3_objects(
+        self,
+        log_type: str,
+        time_window_start: datetime,
+        time_window_end: datetime,
+        batch_size: int,
+        current_queue_size: int
+    ):
         new_objects = []
+        total_size = 0
+        skipped_objects = 0
+
+        # Check if the current queue size exceeds the threshold
+        if current_queue_size >= self.queue_size_threshold:
+            logger.info(
+                f"Current queue size ({current_queue_size}) exceeds threshold ({self.queue_size_threshold}). "
+                f"Pausing S3 object retrieval for {log_type}."
+            )
+            return new_objects  # Return empty list to pause retrieval
 
         try:
-            # Use the TIME_WINDOW_HOURS setting to determine the start time
-            time_window_start = datetime.now(pytz.UTC) - timedelta(hours=self.config.TIME_WINDOW_HOURS)
-            time_window_end = datetime.now(pytz.UTC)
+            paginator = self.s3.get_paginator('list_objects_v2')
+            prefix = f"illumio/{log_type}/"
+            logger.info(f"Searching for {log_type} objects with prefix: {prefix}")
 
-            logger.info(f"Scanning S3 for {log_type} from {time_window_start} to {time_window_end}")
+            # Generate date-based prefixes for the time window
+            date_range = (time_window_end.date() - time_window_start.date()).days
+            date_prefixes = [
+                f"{prefix}{(time_window_start + timedelta(days=i)).strftime('%Y%m%d')}"
+                for i in range(date_range + 1)
+            ]
 
-            if log_type == 'summaries':
-                # Use date-based prefixes for summaries
-                date_list = [time_window_start.date() + timedelta(days=x) for x in range((time_window_end.date() - time_window_start.date()).days + 1)]
-                prefixes = [f"{folder}{date.strftime('%Y%m%d')}" for date in date_list]
-                logger.info(f"Scanning prefixes for summaries: {prefixes}")
-                for prefix in prefixes:
-                    self._scan_prefix(prefix, time_window_start, time_window_end, new_objects, batch_size, log_type)
+            for date_prefix in date_prefixes:
+                if self.stop_event.is_set():
+                    logger.info("Stop event set. Interrupting S3 object listing.")
+                    break
+
+                for page in paginator.paginate(Bucket=self.s3_bucket_name, Prefix=date_prefix):
+                    if 'Contents' in page:
+                        for obj in page['Contents']:
+                            if self.stop_event.is_set():
+                                logger.info("Stop event set. Interrupting S3 object listing.")
+                                break
+
+                            if obj['Key'].endswith('.gz'):
+                                obj_last_modified = obj['LastModified'].replace(tzinfo=pytz.UTC)
+                                if obj['Key'] in self.processed_keys[log_type]:
+                                    logger.debug(f"Skipping already processed object: {obj['Key']}")
+                                    skipped_objects += 1
+                                elif time_window_start <= obj_last_modified <= time_window_end:
+                                    new_objects.append(obj)
+                                    total_size += obj['Size']
+                                    logger.debug(f"Adding new object: {obj['Key']}, Size: {obj['Size']} bytes")
+
+                                    if len(new_objects) >= batch_size:
+                                        logger.info(f"Reached batch size limit of {batch_size} for {log_type}")
+                                        break
+                                else:
+                                    logger.debug(f"Skipping object outside time window: {obj['Key']}, Last Modified: {obj_last_modified}")
+                                    skipped_objects += 1
+                    else:
+                        logger.debug(f"No contents found for prefix {date_prefix}")
+
                     if len(new_objects) >= batch_size:
                         break
-            else:
-                self._scan_prefix(folder, time_window_start, time_window_end, new_objects, batch_size, log_type)
 
-            logger.info(f"Found {len(new_objects)} new objects for {log_type}. Time window: {time_window_start} to {time_window_end}")
+                if len(new_objects) >= batch_size:
+                    break
 
-            self.s3_stats['files_discovered'] += len(new_objects)
-            self.update_s3_stats()
+            logger.info(
+                f"Found {len(new_objects)} new objects for {log_type}. "
+                f"Total size: {total_size / 1024:.2f} KB. "
+                f"Skipped {skipped_objects} objects."
+            )
 
-            return new_objects[:batch_size]  # Return up to batch_size number of objects
+        except NoCredentialsError:
+            logger.error("AWS credentials not found. Please configure your AWS credentials.")
+            self.stop_event.set()
+        except ClientError as e:
+            logger.error(f"An AWS client error occurred: {e}")
+            self.stop_event.set()
+        except EndpointConnectionError as e:
+            logger.error(f"Endpoint connection error occurred: {e}")
+            self.stop_event.set()
         except Exception as e:
-            logger.error(f"Error listing objects: {e}")
-            logger.exception("Detailed error information:")
-        
-        return []
-
-    def _scan_prefix(self, prefix, time_window_start, time_window_end, new_objects, batch_size, log_type):
-        paginator = self.s3.get_paginator('list_objects_v2')
-        for page in paginator.paginate(Bucket=self.s3_bucket_name, Prefix=prefix):
-            if 'Contents' in page:
-                for obj in page['Contents']:
-                    if obj['Key'].endswith('.gz'):
-                        obj_last_modified = obj['LastModified'].replace(tzinfo=pytz.UTC)
-                        if (obj['Key'] not in self.processed_keys[log_type] and
-                            time_window_start <= obj_last_modified <= time_window_end):
-                            new_objects.append(obj)
-                            logger.debug(f"Found new object: {obj['Key']}, Last Modified: {obj_last_modified}")
-                        else:
-                            logger.debug(f"Skipped object: {obj['Key']}, Last Modified: {obj_last_modified}, Already Processed: {obj['Key'] in self.processed_keys[log_type]}")
-                        if len(new_objects) >= batch_size:
-                            return
-            else:
-                logger.info(f"No contents found for prefix: {prefix}")
+            logger.error(f"An unexpected error occurred while listing S3 objects: {e}")
+            logger.debug(traceback.format_exc())
+            self.stop_event.set()
+        return new_objects
 
     def save_state(self):
         if not self.state_file:
@@ -223,59 +293,71 @@ class S3Manager:
             logger.warning(f"Unable to extract timestamp from filename: {filename}")
             return None
 
-    def download_and_extract(self, key, stop_event):
-        if stop_event.is_set():
-            logger.info(f"Stopping extraction of {key} due to shutdown signal.")
-            return None, 0
-
+    def download_and_extract(self, key: str, stop_event: threading.Event):
         try:
+            if stop_event.is_set():
+                logger.info(f"Stop event set. Skipping download of {key}")
+                return None, 0
+
             s3_object = self.s3.get_object(Bucket=self.s3_bucket_name, Key=key)
-            file_content = s3_object['Body'].read()
+            log_type = 'summaries' if 'summaries' in key else 'auditable_events'
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.gz') as temp_file:
-                temp_filename = Path(temp_file.name)
-                temp_file.write(file_content)
+            # Save files in the existing 'state/downloads' directory without changing the structure
+            local_dir = self.downloaded_files_folder / log_type
+            local_dir.mkdir(parents=True, exist_ok=True)
+            local_file_path = local_dir / Path(key).name.replace('.gz', '')
 
-            dest_path = self.downloaded_files_folder / Path(key).name.replace('.gz', '')
-            logger.debug(f"Extracting to: {dest_path}")
-            
-            logs_extracted = 0
-            with gzip.open(temp_filename, 'rb') as f_in:
-                with open(dest_path, 'wb') as f_out:
-                    for line in f_in:
-                        f_out.write(line)
-                        logs_extracted += 1
+            with open(local_file_path, 'wb') as f_out:
+                with gzip.GzipFile(fileobj=s3_object['Body']) as gz:
+                    shutil.copyfileobj(gz, f_out)
 
-            logger.debug(f"Extracted {key} to {dest_path}")
-            logger.debug(f"  Compressed size: {s3_object['ContentLength']} bytes")
-            logger.debug(f"  Uncompressed size: {dest_path.stat().st_size} bytes")
-            logger.debug(f"  Logs extracted: {logs_extracted}")
+            total_lines = 0
+            valid_json_lines = 0
+            with open(local_file_path, 'r') as f:
+                for line in f:
+                    total_lines += 1
+                    try:
+                        json.loads(line)
+                        valid_json_lines += 1
+                    except json.JSONDecodeError:
+                        logger.warning(f"Invalid JSON in file {key} at line {total_lines}")
 
-            self.s3_stats['files_downloaded'] += 1
-            self.s3_stats['files_processed'] += 1
-            self.s3_stats['logs_extracted'] += logs_extracted
-            self.update_s3_stats()
-            return str(dest_path), logs_extracted
+            logger.info(
+                f"Downloaded and extracted {key}. Size: {s3_object['ContentLength']} bytes, "
+                f"Total lines: {total_lines}, Valid JSON lines: {valid_json_lines}"
+            )
+            logger.info(f"Extracted file saved at: {local_file_path}")
+
+            return str(local_file_path), valid_json_lines
+
+        except ClientError as e:
+            logger.error(f"AWS Error downloading {key}: {e}")
+            return None, 0
         except Exception as e:
             logger.error(f"Error downloading or extracting {key}: {e}")
-            logger.exception("Detailed error information:")
+            logger.debug(traceback.format_exc())
             return None, 0
-        finally:
-            if 'temp_filename' in locals():
-                temp_filename.unlink(missing_ok=True)
 
-    def update_and_save_state(self, log_type, s3_object):
+    def update_and_save_state(self, log_type: str, s3_object):
         self.processed_keys[log_type][s3_object['Key']] = datetime.now(pytz.UTC).isoformat()
         self.save_state()
 
-    def load_state(self, state_file):
-        if os.path.exists(state_file):
-            with open(state_file, 'r') as f:
-                state = json.load(f)
-            logger.info(f"Loaded state from {state_file}: Summaries: {len(state['summaries'])}, Auditable Events: {len(state['auditable_events'])}")
-            return state
-        logger.info(f"No existing state file found at {state_file}. Starting fresh.")
-        return {'summaries': {}, 'auditable_events': {}}
+    def load_state(self):
+        if self.state_file.exists():
+            try:
+                with open(self.state_file, 'r') as f:
+                    self.processed_keys = json.load(f)
+                logger.info(
+                    f"Loaded state from {self.state_file}: "
+                    f"Auditable Events: {len(self.processed_keys.get('auditable_events', {}))}, "
+                    f"Summaries: {len(self.processed_keys.get('summaries', {}))}"
+                )
+            except Exception as e:
+                logger.error(f"Failed to load state file {self.state_file}: {e}")
+                self.processed_keys = {'auditable_events': {}, 'summaries': {}}
+        else:
+            logger.info(f"No existing state file found at {self.state_file}. Starting fresh.")
+            self.processed_keys = {'auditable_events': {}, 'summaries': {}}
 
     def update_s3_stats(self):
         current_time = time.time()
@@ -293,3 +375,10 @@ class S3Manager:
                 logger.error(f"Failed to log S3 stats: {e}")
             self.last_stats_update = current_time
         return self.s3_stats.copy()
+
+    def stop(self):
+        logger.info("Stopping S3 Manager...")
+        self.stop_event.set()
+        if hasattr(self.s3, 'close'):
+            self.s3.close()
+        logger.info("S3 Manager stopped.")

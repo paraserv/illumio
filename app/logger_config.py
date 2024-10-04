@@ -39,23 +39,18 @@ def setup_logging():
     log_folder = script_dir / config.get('Paths', 'LOG_FOLDER', fallback='logs')
     log_folder.mkdir(parents=True, exist_ok=True)
 
-    # Create console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.getLevelName(log_level))  # Set console handler level
-    console_handler.setFormatter(console_formatter)
-    root_logger.addHandler(console_handler)
-
-    # Create file handler for app.log
-    app_log_file = log_folder / 'app.log'
-    file_handler = RotatingFileHandler(app_log_file, maxBytes=max_log_size, backupCount=backup_count)
-    file_handler.setLevel(logging.getLevelName(log_level))  # Set file handler level
+    # Set up file handler
+    log_file = log_folder / 'app.log'
+    file_handler = RotatingFileHandler(log_file, maxBytes=max_log_size, backupCount=backup_count)
     file_handler.setFormatter(file_formatter)
     root_logger.addHandler(file_handler)
 
-    # Suppress debug logs from botocore and other noisy libraries
-    logging.getLogger('botocore').setLevel(logging.WARNING)
-    logging.getLogger('boto3').setLevel(logging.WARNING)
-    logging.getLogger('urllib3').setLevel(logging.WARNING)
+    # Set up console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(console_formatter)
+    root_logger.addHandler(console_handler)
+
+    return root_logger
 
 def get_logger(name):
     return logging.getLogger(name)

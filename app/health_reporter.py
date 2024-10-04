@@ -18,10 +18,13 @@ from logger_config import get_logger
 logger = get_logger(__name__)
 
 class HealthReporter:
-    def __init__(self, config):
+    def __init__(self, config, stop_event):
+        self.config = config
+        self.stop_event = stop_event
         self.heartbeat_interval = config.HEARTBEAT_INTERVAL
         self.summary_interval = config.SUMMARY_INTERVAL
-        self.health_log_file = Path(config.APP_DIR) / config.LOG_FOLDER / 'health_report.log'
+        self.health_log_file = Path(config.HEALTH_REPORT_LOG_FILE)
+        self.state_file = Path(config.STATE_FILE)
         self._ensure_log_directory()
         self.last_summary_time = datetime.now()
         self.start_time = datetime.now()
@@ -38,10 +41,8 @@ class HealthReporter:
         self.state_summaries_count = 0
         self.state_auditable_events_count = 0
         self.enable_health_reporter = config.ENABLE_HEALTH_REPORTER
-        self.state_file = Path(config.APP_DIR) / config.STATE_FILE
         self.dropped_logs = {'summaries': 0, 'auditable_events': 0}
         self.drop_threshold = config.DROP_THRESHOLD
-        self.stop_event = threading.Event()
         self.log_processor = None
         self.last_report = {
             'gz_files_processed': {'summaries': 0, 'auditable_events': 0},
@@ -64,28 +65,18 @@ class HealthReporter:
             self.stop_event.clear()
             self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop)
             self.heartbeat_thread.start()
-            self.log_info("*** Application Started ***")  # Added asterisks for clarity
+            self.log_info("*** Application Started ***")  # Adjusted for clarity
 
     def stop(self):
+        logger.info("Stopping Health Reporter...")
+        start_time = time.time()
         self.running = False
         self.stop_event.set()
-        if self.heartbeat_thread:
-            self.heartbeat_thread.join()
-        self.shutdown_time = datetime.now()
-
-        if self.termination_signal_time:
-            shutdown_duration = self.shutdown_time - self.termination_signal_time
-            self.log_info(
-                f"Shutdown completed in {self._format_duration(shutdown_duration)} after termination signal was received."
-            )
-
-        self.log_summary(final=True)
-        self.log_saved_state()
-        self.log_info("*** Application Stopped ***")  # Added asterisks for clarity
+        if self.heartbeat_thread.is_alive():
+            self.heartbeat_thread.join(timeout=5)
+        logger.info(f"Health Reporter stopped. Time taken: {time.time() - start_time:.2f} seconds")
 
     def _heartbeat_loop(self):
-        # Wait for the first interval before sending the first heartbeat
-        self.stop_event.wait(self.heartbeat_interval)
         while not self.stop_event.is_set():
             self._send_heartbeat()
             self.stop_event.wait(self.heartbeat_interval)
@@ -310,8 +301,7 @@ class HealthReporter:
             f.write(f"{datetime.now().isoformat()} - {message}\n")
 
     def _ensure_log_directory(self):
-        log_dir = self.health_log_file.parent
-        log_dir.mkdir(parents=True, exist_ok=True)
+        self.health_log_file.parent.mkdir(parents=True, exist_ok=True)
 
     def update_s3_ingestion_rate(self, rate):
         with self.lock:
