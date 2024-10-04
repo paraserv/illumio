@@ -41,8 +41,6 @@ class HealthReporter:
         self.state_summaries_count = 0
         self.state_auditable_events_count = 0
         self.enable_health_reporter = config.ENABLE_HEALTH_REPORTER
-        self.dropped_logs = {'summaries': 0, 'auditable_events': 0}
-        self.drop_threshold = config.DROP_THRESHOLD
         self.log_processor = None
         self.last_report = {
             'gz_files_processed': {'summaries': 0, 'auditable_events': 0},
@@ -65,7 +63,7 @@ class HealthReporter:
             self.stop_event.clear()
             self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop)
             self.heartbeat_thread.start()
-            self.log_info("*** Application Started ***")  # Adjusted for clarity
+            self.log_info("*** Application Started ***")
 
     def stop(self):
         logger.info("Stopping Health Reporter...")
@@ -212,15 +210,6 @@ class HealthReporter:
     def report_error(self, message, log_type='general'):
         with self.lock:
             self.log_error(f"{log_type} Error: {message}")
-            if 'Log dropped' in message:
-                self.dropped_logs[log_type] += 1
-                if self.dropped_logs[log_type] > self.drop_threshold:
-                    self.alert_on_dropped_logs(log_type)
-
-    def alert_on_dropped_logs(self, log_type):
-        alert_message = f"Alert: Dropped logs for {log_type} exceeded threshold of {self.drop_threshold}."
-        self.log_error(alert_message)
-        # Optionally, integrate with an alerting system here
 
     def report_heartbeat(self):
         with self.lock:

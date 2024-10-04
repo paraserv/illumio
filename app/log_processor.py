@@ -139,16 +139,16 @@ class LogProcessor:
         self.db_connection.commit()
 
     def enqueue_log(self, log_line, log_type):
-        current_size = self.get_queue_size()
+        # Always enqueue the log, even if the queue is full
         self.log_queue.put((log_line, log_type))
         new_size = self.get_queue_size()
-        size_increase = new_size - current_size
-        if size_increase > 1:
-            logger.warning(f"Queue size increased by {size_increase} after adding 1 log. Current size: {new_size}")
-            logger.debug(f"Enqueued log: {log_line[:100]}...")
         with self.stats_lock:
             self.stats['logs_queued'] += 1
             self.stats['current_queue_size'] = new_size
+        
+        # Log a warning if the queue size exceeds the threshold
+        if new_size > self.queue_size_threshold:
+            logger.warning(f"Queue size ({new_size}) has exceeded the threshold ({self.queue_size_threshold})")
 
     def dequeue_log(self):
         with self.queue_lock:
@@ -389,8 +389,9 @@ class LogProcessor:
                 time.sleep(retry_delay)
                 retry_delay *= 2  # Exponential backoff
 
-        # After max retries, log the error and continue
-        self.health_reporter.report_error("Max retries reached. Log dropped.", log_type)
+        # After max retries, re-queue the log instead of dropping it
+        logger.warning(f"Max retries reached for log. Re-queueing.")
+        self.enqueue_log(log_line, log_type)
         return False
 
     def _refill_tokens(self):

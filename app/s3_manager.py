@@ -81,8 +81,7 @@ class S3Manager:
         self.baseline_period = settings_config.getfloat('S3', 'BASELINE_PERIOD', fallback=300.0)
         self.MIN_TIMEFRAME = settings_config.getfloat('Processing', 'MIN_TIMEFRAME', fallback=0.25)
         self.MAX_TIMEFRAME = settings_config.getfloat('Processing', 'MAX_TIMEFRAME', fallback=24.0)
-        self.log_timeframe = config.LOG_TIMEFRAME
-
+        
         self.config = config  # Store the config object
         self.time_window_hours = config.TIME_WINDOW_HOURS
 
@@ -270,10 +269,10 @@ class S3Manager:
         if processing_time > 0:
             processing_mps = float(processed_count) / processing_time
             ideal_timeframe = max(60.0, (ingestion_mps / processing_mps) * 3600 * 1.2)
-            old_timeframe = self.log_timeframe * 3600
-            self.log_timeframe = max(min(ideal_timeframe, self.MAX_TIMEFRAME * 3600), self.MIN_TIMEFRAME * 3600) / 3600
+            old_timeframe = self.time_window_hours * 3600  # Use time_window_hours instead of log_timeframe
+            self.time_window_hours = max(min(ideal_timeframe, self.MAX_TIMEFRAME * 3600), self.MIN_TIMEFRAME * 3600) / 3600
             
-            message = (f"S3 Manager: Log timeframe adjusted: {old_timeframe/60:.2f} min -> {self.log_timeframe*60:.2f} min. "
+            message = (f"S3 Manager: Log timeframe adjusted: {old_timeframe/60:.2f} min -> {self.time_window_hours*60:.2f} min. "
                        f"Processing rate: {processing_mps:.2f} MB/s, "
                        f"Ingestion rate: {ingestion_mps:.2f} MB/s, "
                        f"Ideal timeframe: {ideal_timeframe/60:.2f} min. "
