@@ -56,6 +56,8 @@ class HealthReporter:
             'files_processed': 0,
             'logs_extracted': 0
         }
+        self.log_processor_stats = {}
+        self.log_processor_stats_lock = threading.Lock()
 
     def start(self):
         if not self.running:
@@ -186,12 +188,6 @@ class HealthReporter:
             if current_time - self.last_log_time >= self.log_interval:
                 self.log_info(message)
                 self.last_log_time = current_time
-            if "S3 Manager: Current S3 log ingestion rate:" in message:
-                try:
-                    rate_str = message.split(":")[-2].strip().split()[0]
-                    self.last_s3_ingestion_rate = float(rate_str)
-                except ValueError:
-                    logger.error(f"Health Reporter: Failed to parse S3 ingestion rate from message: {message}")
 
     def log_recovered_state(self, state_summaries_count, state_auditable_events_count):
         self.log_info(f"Recovered State - Summaries: {state_summaries_count}, Auditable Events: {state_auditable_events_count}")
@@ -281,7 +277,8 @@ class HealthReporter:
                     "syslog_messages_sent": self.syslog_messages_sent['auditable_events']
                 },
                 "s3_operations": self.s3_stats,
-                "s3_ingestion_rate": self.s3_ingestion_rate
+                "s3_ingestion_rate": self.s3_ingestion_rate,
+                "log_processor_stats": self.log_processor_stats
             }
             self._write_to_health_log(json.dumps(report, indent=2))
 
@@ -302,3 +299,7 @@ class HealthReporter:
     def update_s3_stats(self, stats):
         with self.lock:
             self.s3_stats = stats
+
+    def update_log_processor_stats(self, stats):
+        with self.log_processor_stats_lock:
+            self.log_processor_stats = stats

@@ -285,7 +285,7 @@ def main():
             health_reporter=health_reporter,
             max_pool_connections=config.MAX_POOL_CONNECTIONS,
             state_file=state_file,
-            downloaded_files_folder=download_folder,  # Use the updated download_folder
+            downloaded_files_folder=download_folder,
             config=config,
             stop_event=stop_event
         )
@@ -352,7 +352,7 @@ def process_s3_object(s3_manager, log_processor, health_reporter, s3_object, log
     result, logs_extracted = handle_log_file(s3_object, s3_manager, log_processor, log_type, stop_event, health_reporter)
     if result:
         s3_manager.update_and_save_state(log_type, s3_object)
-        logger.info(f"Successfully processed: {s3_object['Key']}, Type: {log_type}, Logs extracted: {logs_extracted}, Current MPS: {log_processor.current_mps:.2f}")
+        logger.info(f"Successfully processed: {s3_object['Key']}, Type: {log_type}, Logs extracted: {logs_extracted}")
     else:
         logger.warning(f"Failed to process: {s3_object['Key']}, Type: {log_type}, Logs extracted: {logs_extracted}")
 

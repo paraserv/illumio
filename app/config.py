@@ -74,7 +74,9 @@ class Config:
         self.QUEUE_SIZE_THRESHOLD = self._config.getint('Processing', 'QUEUE_SIZE_THRESHOLD', fallback=10000)
         self.MAX_QUEUE_SIZE = self._config.getint('Processing', 'MAX_QUEUE_SIZE', fallback=100000)
         self.TIME_WINDOW_HOURS = self._config.getfloat('Processing', 'TIME_WINDOW_HOURS', fallback=8.0)
-
+        self.QUEUE_EMPTY_SLEEP_TIME = float(self._config.get('Processing', 'QUEUE_EMPTY_SLEEP_TIME', fallback='0.1'))
+        self.RATE_LIMIT_SLEEP_TIME = float(self._config.get('Processing', 'RATE_LIMIT_SLEEP_TIME', fallback='0.01'))
+        
         # Logging settings
         self.ENABLE_SAMPLE_LOGGING = self._config.getboolean('Logging', 'ENABLE_SAMPLE_LOGGING', fallback=False)
         self.SAMPLE_LOG_INTERVAL = self._config.getint('Logging', 'SAMPLE_LOG_INTERVAL', fallback=60)

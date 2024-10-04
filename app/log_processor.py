@@ -32,7 +32,6 @@ logger = logging.getLogger(__name__)
 
 class TokenBucket:
     def __init__(self, rate, capacity=None):
-        self.current_mps = 0
         self.rate = rate
         self.capacity = capacity or rate
         self.tokens = self.capacity
@@ -62,6 +61,7 @@ class LogProcessor:
         self.sma_host = config.SMA_HOST
         self.sma_port = config.SMA_PORT
         self.max_messages_per_second = config.MAX_MESSAGES_PER_SECOND
+        self.token_bucket = TokenBucket(self.max_messages_per_second)
         self.min_messages_per_second = config.MIN_MESSAGES_PER_SECOND
         self.enable_dynamic_syslog_rate = config.ENABLE_DYNAMIC_SYSLOG_RATE
         self.BEATNAME = config.BEATNAME
@@ -110,6 +110,9 @@ class LogProcessor:
         self.last_mps_check = time.time()
         self.messages_sent_since_last_check = 0
         self.current_mps = self.min_messages_per_second  # Start with the minimum rate
+        self.messages_sent_since_last_report = 0
+        self.last_report_time = time.time()
+        self.report_interval = 60  # Report every 60 seconds
 
     def _setup_syslog(self):
         try:
@@ -139,16 +142,15 @@ class LogProcessor:
         self.db_connection.commit()
 
     def enqueue_log(self, log_line, log_type):
-        # Always enqueue the log, even if the queue is full
-        self.log_queue.put((log_line, log_type))
-        new_size = self.get_queue_size()
+        with self.queue_lock:
+            self.db_cursor.execute('INSERT INTO log_queue (log_message, log_type) VALUES (?, ?)', (log_line, log_type))
+            self.db_connection.commit()
         with self.stats_lock:
             self.stats['logs_queued'] += 1
-            self.stats['current_queue_size'] = new_size
+            self.stats['current_queue_size'] = self.get_queue_size()
         
-        # Log a warning if the queue size exceeds the threshold
-        if new_size > self.queue_size_threshold:
-            logger.warning(f"Queue size ({new_size}) has exceeded the threshold ({self.queue_size_threshold})")
+        if self.stats['current_queue_size'] > self.queue_size_threshold:
+            logger.warning(f"Queue size ({self.stats['current_queue_size']}) has exceeded the threshold ({self.queue_size_threshold})")
 
     def dequeue_log(self):
         with self.queue_lock:
@@ -161,41 +163,141 @@ class LogProcessor:
             else:
                 return None, None
 
+    def get_queue_size(self):
+        with self.queue_lock:
+            self.db_cursor.execute('SELECT COUNT(*) FROM log_queue')
+            return self.db_cursor.fetchone()[0]
+
+    def process_queue(self):
+        while not self.stop_event.is_set():
+            if self.token_bucket.consume():
+                log_line, log_type = self.dequeue_log()
+                if log_line:
+                    success = self._send_log(log_line, log_type)
+                    with self.stats_lock:
+                        if success:
+                            self.stats['logs_sent'] += 1
+                        else:
+                            self.stats['logs_failed'] += 1
+                            self.enqueue_log(log_line, log_type)  # Re-queue failed logs
+                else:
+                    time.sleep(self.config.QUEUE_EMPTY_SLEEP_TIME)
+            else:
+                time.sleep(self.config.RATE_LIMIT_SLEEP_TIME)
+
+    def _send_log(self, log_line, log_type):
+        max_retries = 5
+        retry_delay = 1  # in seconds
+
+        for attempt in range(max_retries):
+            try:
+                if self.send_to_siem(log_line, log_type):
+                    return True
+                else:
+                    logger.error(f"Attempt {attempt + 1}: Failed to send log.")
+            except Exception as e:
+                logger.error(f"Exception in _send_log: {e}")
+                self.health_reporter.report_error(f"Exception in _send_log: {e}", log_type)
+            
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+
+        logger.warning(f"Max retries reached for log. Re-queueing.")
+        return False
+
+    def send_to_siem(self, log_line, log_type):
+        try:
+            if self.syslog is None:
+                self.syslog = self._setup_syslog()
+                if self.syslog is None:
+                    return False
+
+            if isinstance(log_line, str):
+                log_line_str = log_line
+            else:
+                log_line_str = log_line.decode('utf-8')
+
+            current_time_str = time.strftime("%b %d %Y %H:%M:%S", time.localtime())
+            syslog_ip = socket.gethostbyname(socket.gethostname())
+            syslog_message = f"{current_time_str} {syslog_ip} <USER:NOTE> {log_line_str}"
+
+            if self.USE_TCP:
+                self.syslog.sendall(syslog_message.encode('utf-8') + b'\n')
+            else:
+                self.syslog.sendto(syslog_message.encode('utf-8'), (self.sma_host, self.sma_port))
+
+            self.messages_sent_since_last_report += 1
+            self.health_reporter.report_syslog_sent(1, log_type)
+
+            current_time = time.time()
+            if current_time - self.last_report_time >= self.report_interval:
+                self._report_stats()
+
+            return True
+        except Exception as e:
+            logger.error(f"[ERROR] Sending log to SIEM ({self.sma_host}:{self.sma_port}): {str(e)}")
+            if self.syslog:
+                self.syslog.close()
+                self.syslog = None
+            return False
+
+    def _report_stats(self):
+        current_time = time.time()
+        elapsed_time = current_time - self.last_report_time
+        mps = self.messages_sent_since_last_report / elapsed_time if elapsed_time > 0 else 0
+        
+        logger.info(f"[SYSLOG] Sent {self.messages_sent_since_last_report} logs to SIEM in the last {elapsed_time:.2f} seconds. Current MPS: {mps:.2f}")
+        
+        self.health_reporter.log_message(f"LogProcessor: Sent {self.messages_sent_since_last_report} logs, MPS: {mps:.2f}")
+        
+        self.messages_sent_since_last_report = 0
+        self.last_report_time = current_time
+
+    def start_processing(self):
+        if not self.processing_thread.is_alive():
+            self.processing_thread = threading.Thread(target=self.process_queue, daemon=True)
+            self.processing_thread.start()
+
+    def stop_processing(self):
+        logger.info("Stopping Log Processor...")
+        start_time = time.time()
+        self.stop_event.set()
+        if self.processing_thread.is_alive():
+            self.processing_thread.join(timeout=5)
+        self.drain_queue(self.stop_event, timeout=self.config.SHUTDOWN_TIMEOUT)
+        logger.info(f"Log Processor stopped. Time taken: {time.time() - start_time:.2f} seconds")
+
     def drain_queue(self, stop_event, timeout=None):
         start_time = time.time()
         while not stop_event.is_set():
-            with self.queue_lock:
-                self.db_cursor.execute(
-                    'SELECT id, log_message, log_type FROM log_queue ORDER BY id ASC LIMIT 100'
-                )
-                records = self.db_cursor.fetchall()
-                if not records:
-                    break
-                ids_to_delete = []
-                for record in records:
-                    if stop_event.is_set():
-                        logger.info("Stopping drain_queue due to shutdown signal.")
-                        return
-                    log_id, log_message, log_type = record
-                    sent = self._send_log(log_message, log_type)
-                    if sent:
-                        ids_to_delete.append((log_id,))
-                        self.health_reporter.report_syslog_sent(1, log_type)
-                    else:
-                        logger.error(f"Failed to send log: {log_message[:100]}...")
-                if ids_to_delete:
-                    self.db_cursor.executemany('DELETE FROM log_queue WHERE id = ?', ids_to_delete)
-                    self.db_connection.commit()
+            log_line, log_type = self.dequeue_log()
+            if log_line:
+                success = self._send_log(log_line, log_type)
+                if not success:
+                    self.enqueue_log(log_line, log_type)  # Re-queue failed logs
+            else:
+                break  # Queue is empty
             if timeout and (time.time() - start_time) > timeout:
                 logger.warning("Drain queue timeout reached.")
                 break
+
+    def get_stats(self):
+        with self.stats_lock:
+            stats = self.stats.copy()
+        stats['current_queue_size'] = self.get_queue_size()
+        return stats
+
+    def log_queue_stats(self):
+        stats = self.get_stats()
+        logger.info(f"[QUEUE_STATS] Size: {stats['current_queue_size']}, Queued: {stats['logs_queued']}, Sent: {stats['logs_sent']}, Failed: {stats['logs_failed']}")
 
     def process_log_file(self, file_path: Path, log_type: str, stop_event: threading.Event) -> Tuple[bool, int]:
         logger.info(f"[FILE_PROCESSING] Starting: {file_path}, Type: {log_type}")
         
         try:
             logs_extracted = 0
-            logs_sent = 0
+            logs_enqueued = 0
             total_lines = 0
             with open(file_path, 'r') as f:
                 for line in f:
@@ -209,21 +311,20 @@ class LogProcessor:
                     try:
                         log_entry_dict = json.loads(line)
                         transformed_log = self.transform_log_based_on_policy(log_entry_dict, log_type)
-                        
                         formatted_log = self.format_log_for_siem(transformed_log, log_entry_dict)
-                        if self.send_to_siem(formatted_log, log_type):
-                            logs_sent += 1
-                        else:
-                            logger.warning(f"Failed to send log to SIEM: {formatted_log[:100]}...")
+                        
+                        # Enqueue the log instead of sending directly
+                        self.enqueue_log(formatted_log, log_type)
+                        logs_enqueued += 1
                     except json.JSONDecodeError:
                         logger.error(f"Invalid JSON in file {file_path} at line {total_lines}: {line[:100]}...")
                     except Exception as e:
                         logger.error(f"Error processing line {total_lines} in file {file_path}: {str(e)}")
                     
                     if logs_extracted % 100 == 0:
-                        logger.info(f"[PROGRESS] {file_path}: {logs_extracted}/{total_lines} logs processed, {logs_sent} sent.")
+                        logger.info(f"[PROGRESS] {file_path}: {logs_extracted}/{total_lines} logs processed, {logs_enqueued} enqueued.")
 
-            logger.info(f"[FILE_PROCESSING] Completed: {file_path}. Total lines: {total_lines}, Logs extracted: {logs_extracted}, Logs sent: {logs_sent}")
+            logger.info(f"[FILE_PROCESSING] Completed: {file_path}. Total lines: {total_lines}, Logs extracted: {logs_extracted}, Logs enqueued: {logs_enqueued}")
             return True, logs_extracted
         except Exception as e:
             logger.error(f"[ERROR] Processing file {file_path}: {e}")
@@ -371,29 +472,6 @@ class LogProcessor:
             else:
                 self.logs_dropped += 1
 
-    def _send_log(self, log_line, log_type):
-        max_retries = 5
-        retry_delay = 1  # in seconds
-
-        for attempt in range(max_retries):
-            try:
-                if self.send_to_siem(log_line, log_type):
-                    return True
-                else:
-                    logger.error(f"Attempt {attempt + 1}: Failed to send log.")
-            except Exception as e:
-                logger.error(f"Exception in _send_log: {e}")
-                self.health_reporter.report_error(f"Exception in _send_log: {e}", log_type)
-            
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
-
-        # After max retries, re-queue the log instead of dropping it
-        logger.warning(f"Max retries reached for log. Re-queueing.")
-        self.enqueue_log(log_line, log_type)
-        return False
-
     def _refill_tokens(self):
         current_time = time.time()
         elapsed = current_time - self.last_refill
@@ -401,96 +479,6 @@ class LogProcessor:
         with self.token_lock:
             self.tokens = min(self.max_messages_per_second, self.tokens + refill_amount)
             self.last_refill = current_time
-
-    def send_to_siem(self, log_line, log_type):
-        try:
-            logger.debug(f"Attempting to send log to SIEM. Type: {log_type}")
-            if self.syslog is None:
-                logger.debug(f"Setting up syslog connection to {self.sma_host}:{self.sma_port}")
-                self.syslog = self._setup_syslog()
-                if self.syslog is None:
-                    logger.error(f"Failed to set up syslog connection to {self.sma_host}:{self.sma_port}")
-                    return False
-
-            if isinstance(log_line, str):
-                log_line_str = log_line
-            else:
-                log_line_str = log_line.decode('utf-8')
-
-            current_time_str = time.strftime("%b %d %Y %H:%M:%S", time.localtime())
-            syslog_ip = socket.gethostbyname(socket.gethostname())
-            syslog_message = f"{current_time_str} {syslog_ip} <USER:NOTE> {log_line_str}"
-
-            # Sample logging
-            if self.ENABLE_SAMPLE_LOGGING:
-                current_time = time.time()
-                if current_time - self.last_sample_log_time >= self.SAMPLE_LOG_INTERVAL:
-                    sample = syslog_message[:self.SAMPLE_LOG_LENGTH]
-                    logger.info(f"[SAMPLE_LOG] Sending to SIEM ({self.sma_host}:{self.sma_port}): {sample}")
-                    self.last_sample_log_time = current_time
-
-            if self.USE_TCP:
-                logger.debug(f"Using TCP to send log to {self.sma_host}:{self.sma_port}")
-                self.syslog.sendall(syslog_message.encode('utf-8') + b'\n')
-            else:
-                logger.debug(f"Using UDP to send log to {self.sma_host}:{self.sma_port}")
-                self.syslog.sendto(syslog_message.encode('utf-8'), (self.sma_host, self.sma_port))
-
-            logger.debug(f"Log sent successfully to {self.sma_host}:{self.sma_port}")
-
-            self.logs_sent += 1
-            self.messages_sent_since_last_check += 1
-            self.health_reporter.report_syslog_sent(1, log_type)
-
-            self._update_mps()
-
-            if self.logs_sent % 1000 == 0:
-                logger.info(f"[SYSLOG] Sent {self.logs_sent} logs to SIEM ({self.sma_host}:{self.sma_port}). Current MPS: {self.current_mps:.2f}")
-
-            return True
-        except Exception as e:
-            logger.error(f"[ERROR] Sending log to SIEM ({self.sma_host}:{self.sma_port}): {str(e)}")
-            logger.debug(f"Full exception: {traceback.format_exc()}")
-            if self.syslog:
-                self.syslog.close()
-                self.syslog = None
-            return False
-
-    def _update_mps(self):
-        now = time.time()
-        time_diff = now - self.last_mps_check
-        if time_diff >= 60:  # Update MPS every minute
-            self.current_mps = self.messages_sent_since_last_check / time_diff
-            logger.info(f"[MPS] Current messages per second: {self.current_mps:.2f}")
-            self.last_mps_check = now
-            self.messages_sent_since_last_check = 0
-
-    def start_processing(self):
-        self.processing_thread = threading.Thread(target=self.process_queue)
-        self.processing_thread.start()
-
-    def process_queue(self):
-        while not self.stop_event.is_set():
-            try:
-                log_item = self.log_queue.get(timeout=1)
-                # ... process the log item ...
-                self.log_queue.task_done()
-            except queue.Empty:
-                continue
-        logger.info("Log processing thread exiting gracefully.")
-
-    def _acquire_token(self):
-        with self.token_lock:
-            now = time.time()
-            time_passed = now - self.last_refill
-            self.tokens = min(self.max_messages_per_second,
-                              self.tokens + time_passed * self.max_messages_per_second)
-            self.last_refill = now
-
-            if self.tokens < 1:
-                return False
-            self.tokens -= 1
-            return True
 
     def adjust_syslog_rate(self, logs_sent, elapsed_time):
         if not self.enable_dynamic_syslog_rate:
@@ -525,22 +513,3 @@ class LogProcessor:
         if self.db_connection:
             self.db_connection.close()
         logger.info(f"LogProcessor resources closed. Time taken: {time.time() - start_time:.2f} seconds")
-
-    def get_stats(self):
-        with self.stats_lock:
-            return self.stats.copy()
-
-    def get_queue_size(self):
-        return self.log_queue.qsize()
-
-    def stop_processing(self):
-        logger.info("Stopping Log Processor...")
-        start_time = time.time()
-        self.stop_event.set()
-        if self.processing_thread.is_alive():
-            self.processing_thread.join(timeout=5)
-        logger.info(f"Log Processor stopped. Time taken: {time.time() - start_time:.2f} seconds")
-
-    def log_queue_stats(self):
-        stats = self.get_stats()
-        logger.info(f"[QUEUE_STATS] Size: {self.get_queue_size()}, Queued: {stats['logs_queued']}, Sent: {stats['logs_sent']}, Failed: {stats['logs_failed']}, Current MPS: {self.current_mps:.2f}")
