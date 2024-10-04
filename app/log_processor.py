@@ -172,7 +172,7 @@ class LogProcessor:
         logs_sent = 0
         start_time = time.time()
         last_log_time = time.time()
-        log_interval = 5  # Log every 5 seconds
+        log_interval = 60  # Log every 60 seconds
 
         while not self.stop_event.is_set():
             if self.token_bucket.consume():
@@ -194,12 +194,16 @@ class LogProcessor:
             current_time = time.time()
             elapsed_time = current_time - start_time
             
-            # Log progress every 5 seconds
+            # Log progress only if logs were sent and enough time has passed
             if current_time - last_log_time >= log_interval:
-                mps = logs_sent / elapsed_time if elapsed_time > 0 else 0
-                backlog = self.get_queue_size()
-                logger.info(f"[SYSLOG_PROGRESS] Sent {logs_sent} logs in {elapsed_time:.2f} seconds. "
-                            f"Current MPS: {mps:.2f}, Backlog: {backlog} logs")
+                if logs_sent > 0:
+                    mps = logs_sent / elapsed_time if elapsed_time > 0 else 0
+                    backlog = self.get_queue_size()
+                    logger.info(f"[SYSLOG_PROGRESS] Sent {logs_sent} logs in {elapsed_time:.2f} seconds. "
+                                f"Current MPS: {mps:.2f}, Backlog: {backlog} logs")
+                else:
+                    logger.debug("No logs sent in the last interval.")
+                
                 logs_sent = 0
                 start_time = current_time
                 last_log_time = current_time
@@ -317,10 +321,11 @@ class LogProcessor:
         try:
             logs_extracted = 0
             logs_enqueued = 0
-            total_lines = 0
+            total_lines = sum(1 for _ in open(file_path, 'r'))
+            logger.info(f"[FILE_PROCESSING] Total lines in file: {total_lines}")
+            
             with open(file_path, 'r') as f:
                 for line in f:
-                    total_lines += 1
                     if stop_event.is_set():
                         logger.info(f"[FILE_PROCESSING] Stopped: {file_path} due to shutdown signal.")
                         return False, logs_extracted
@@ -336,9 +341,9 @@ class LogProcessor:
                         self.enqueue_log(formatted_log, log_type)
                         logs_enqueued += 1
                     except json.JSONDecodeError:
-                        logger.error(f"Invalid JSON in file {file_path} at line {total_lines}: {line[:100]}...")
+                        logger.error(f"Invalid JSON in file {file_path} at line {logs_extracted}: {line[:100]}...")
                     except Exception as e:
-                        logger.error(f"Error processing line {total_lines} in file {file_path}: {str(e)}")
+                        logger.error(f"Error processing line {logs_extracted} in file {file_path}: {str(e)}")
                     
                     if logs_extracted % 100 == 0:
                         logger.info(f"[PROGRESS] {file_path}: {logs_extracted}/{total_lines} logs processed, {logs_enqueued} enqueued.")

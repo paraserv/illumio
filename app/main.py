@@ -45,10 +45,10 @@ health_reporter = None
 shutdown_initiated = False
 
 def signal_handler(signum, frame):
-    logger.info("Received termination signal. Initiating shutdown...")
+    logger.info("Received termination signal.")
     stop_event.set()
 
-def shutdown_with_timeout(timeout=30):
+def shutdown_with_timeout(timeout=120):  # Increased timeout to 120 seconds
     global shutdown_initiated
     if shutdown_initiated:
         return
@@ -72,7 +72,10 @@ def shutdown_with_timeout(timeout=30):
         logger.warning(f"Shutdown process did not complete within {timeout} seconds.")
         logger.info("Current thread states:")
         for thread in threading.enumerate():
-            logger.info(f"Thread {thread.name}: {'Alive' if thread.is_alive() else 'Not Alive'}")
+            if thread.name.startswith('pydevd'):
+                logger.warning(f"Debugger thread {thread.name} is still alive.")
+            else:
+                logger.info(f"Thread {thread.name}: {'Alive' if thread.is_alive() else 'Not Alive'}")
             if thread.is_alive():
                 frame = sys._current_frames().get(thread.ident)
                 if frame:
@@ -182,12 +185,12 @@ def handle_log_file(s3_object, s3_manager, log_processor, log_type, stop_event, 
 
     result, logs_processed = log_processor.process_log_file(local_file, log_type, stop_event)
     
-    # Keep the extracted file for manual inspection
-    logger.info(f"Extracted file saved at: {local_file}")
-
     if result:
         health_reporter.report_gz_file_processed(log_type)
         health_reporter.report_logs_extracted(logs_extracted, log_type)
+        s3_manager.cleanup_downloaded_file(local_file)  # Add this line
+    else:
+        logger.warning(f"Failed to process {local_file}. File will be retained for inspection.")
 
     return result, logs_processed
 
@@ -303,24 +306,28 @@ def main():
             logger.debug("Starting new iteration of main processing loop")
             
             for log_type in log_types:
+                if stop_event.is_set():
+                    break
                 logger.info(f"Processing log type: {log_type}")
                 processed = process_log_type(s3_manager, log_processor, health_reporter, config, log_type)
                 if processed:
                     logger.info(f"Processed {log_type} logs")
                 else:
                     logger.info(f"No {log_type} logs to process at this time")
-                
-                if stop_event.is_set():
-                    break
+
+            if stop_event.is_set():
+                break
 
             logger.debug("Finished processing all log types")
-            logger.info(f"Sleeping for {config.POLL_INTERVAL} seconds before next iteration")
-            time.sleep(config.POLL_INTERVAL)
+            logger.info(f"S3 file monitoring will wait for {config.POLL_INTERVAL} seconds before looking for new files")
+            
+            # Use wait instead of sleep to allow for immediate termination
+            if stop_event.wait(config.POLL_INTERVAL):
+                break
 
     except Exception as e:
         logger.exception(f"Unhandled exception in main loop: {e}")
     finally:
-        logger.info("Initiating shutdown...")
         shutdown(s3_manager, log_processor, health_reporter)
 
 def process_log_type(s3_manager, log_processor, health_reporter, config, log_type):

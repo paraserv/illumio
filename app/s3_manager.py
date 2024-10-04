@@ -183,6 +183,7 @@ class S3Manager:
                 for i in range(date_range + 1)
             ]
 
+            skipped_files = 0
             for date_prefix in date_prefixes:
                 if self.stop_event.is_set():
                     logger.info("Stop event set. Interrupting S3 object listing.")
@@ -196,10 +197,12 @@ class S3Manager:
                                 break
 
                             if obj['Key'].endswith('.gz'):
+                                self.s3_stats['files_discovered'] += 1
                                 obj_last_modified = obj['LastModified'].replace(tzinfo=pytz.UTC)
                                 if obj['Key'] in self.processed_keys[log_type]:
                                     logger.debug(f"Skipping already processed object: {obj['Key']}")
                                     skipped_objects += 1
+                                    skipped_files += 1
                                 elif time_window_start <= obj_last_modified <= time_window_end:
                                     new_objects.append(obj)
                                     total_size += obj['Size']
@@ -223,7 +226,7 @@ class S3Manager:
             logger.info(
                 f"Found {len(new_objects)} new objects for {log_type}. "
                 f"Total size: {total_size / 1024:.2f} KB. "
-                f"Skipped {skipped_objects} objects."
+                f"Skipped {skipped_files} S3 files as previously processed."
             )
 
         except NoCredentialsError:
@@ -321,11 +324,18 @@ class S3Manager:
                     except json.JSONDecodeError:
                         logger.warning(f"Invalid JSON in file {key} at line {total_lines}")
 
+            if self.config.RETAIN_DOWNLOADED_LOGS:
+                logger.info(f"Extracted file saved at: {local_file_path}")
+            else:
+                logger.info(f"Extracted file temporarily saved at: {local_file_path}")
+
             logger.info(
                 f"Downloaded and extracted {key}. Size: {s3_object['ContentLength']} bytes, "
                 f"Total lines: {total_lines}, Valid JSON lines: {valid_json_lines}"
             )
-            logger.info(f"Extracted file saved at: {local_file_path}")
+
+            self.s3_stats['files_downloaded'] += 1
+            self.s3_stats['logs_extracted'] += valid_json_lines
 
             return str(local_file_path), valid_json_lines
 
@@ -339,6 +349,7 @@ class S3Manager:
 
     def update_and_save_state(self, log_type: str, s3_object):
         self.processed_keys[log_type][s3_object['Key']] = datetime.now(pytz.UTC).isoformat()
+        self.s3_stats['files_processed'] += 1
         self.save_state()
 
     def load_state(self):
@@ -381,3 +392,11 @@ class S3Manager:
         if hasattr(self.s3, 'close'):
             self.s3.close()
         logger.info("S3 Manager stopped.")
+
+    def cleanup_downloaded_file(self, file_path):
+        if not self.config.RETAIN_DOWNLOADED_LOGS:
+            try:
+                os.remove(file_path)
+                logger.info(f"Cleaned up downloaded file: {file_path}")
+            except Exception as e:
+                logger.error(f"Failed to clean up file {file_path}: {e}")

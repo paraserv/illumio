@@ -299,6 +299,10 @@ class HealthReporter:
     def update_s3_stats(self, stats):
         with self.lock:
             self.s3_stats = stats
+            self.log_s3_stats(f"S3 Stats: Discovered: {stats['files_discovered']}, "
+                              f"Downloaded: {stats['files_downloaded']}, "
+                              f"Processed: {stats['files_processed']}, "
+                              f"Logs extracted: {stats['logs_extracted']}")
 
     def update_log_processor_stats(self, stats):
         with self.log_processor_stats_lock:

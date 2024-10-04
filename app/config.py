@@ -93,3 +93,7 @@ class Config:
 
         if not self.SMA_HOST:
             raise ValueError("SMA_HOST is not set in settings.ini")
+
+    @property
+    def RETAIN_DOWNLOADED_LOGS(self):
+        return self._config.getboolean('Processing', 'RETAIN_DOWNLOADED_LOGS', fallback=False)
