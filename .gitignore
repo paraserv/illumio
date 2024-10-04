@@ -13,8 +13,8 @@
 
 # Ignore log files and directories
 *.log
-logs/
-illumio/
+**/logs/*
+**/state/*
 
 # Python bytecode files
 **/__pycache__/
@@ -34,4 +34,4 @@ docker-compose.yml
 .git
 
 # Ensure state.json is not ignored
-!state.json
+#!state.json
