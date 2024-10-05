@@ -32,21 +32,20 @@ class Config:
         self.S3_BUCKET_NAME = os.getenv('S3_BUCKET_NAME')
         
         # S3 settings
-        self.MINUTES = self._config.getint('S3', 'MINUTES', fallback=30)
         self.MAX_FILES_PER_FOLDER = self._config.getint('S3', 'MAX_FILES_PER_FOLDER', fallback=5)
         self.BASE_PATHS = self._config.get('S3', 'BASE_PATHS', fallback='').split(',')
         self.MAX_POOL_CONNECTIONS = self._config.getint('S3', 'MAX_POOL_CONNECTIONS', fallback=10)
         self.POLL_INTERVAL = self._config.getint('S3', 'POLL_INTERVAL', fallback=10)
+        self.TIME_WINDOW_HOURS = self._config.getfloat('S3', 'TIME_WINDOW_HOURS', fallback=12.0)
         
         # Paths
         self.APP_DIR = Path(__file__).parent
         self.STATE_DIR = self.APP_DIR / 'state'
-        self.STATE_DIR.mkdir(parents=True, exist_ok=True)  # Ensure STATE_DIR exists
+        self.STATE_DIR.mkdir(parents=True, exist_ok=True)
         self.STATE_FILE = self.STATE_DIR / self._config.get('Paths', 'STATE_FILE', fallback='state.json')
-        self.LOG_QUEUE_DB = self.STATE_DIR / 'log_queue.db'
-        self.DOWNLOADED_FILES_FOLDER = self.APP_DIR / self._config.get('Paths', 'DOWNLOADED_FILES_FOLDER', fallback='illumio')
         self.LOG_FOLDER = self.APP_DIR / self._config.get('Paths', 'LOG_FOLDER', fallback='logs')
-        self.HEALTH_REPORT_LOG_FILE = self.LOG_FOLDER / 'health_report.log'
+        self.APP_LOG_FILE = self.LOG_FOLDER / self._config.get('Logging', 'APP_LOG_FILE', fallback='app.json')
+        self.HEALTH_REPORT_LOG_FILE = self.LOG_FOLDER / self._config.get('Logging', 'HEALTH_REPORT_LOG_FILE', fallback='health_report.json')
         
         # Health Reporting
         self.HEARTBEAT_INTERVAL = self._config.getfloat('HealthReporting', 'HEARTBEAT_INTERVAL', fallback=15.0)
@@ -73,11 +72,11 @@ class Config:
         self.ADJUSTMENT_INTERVAL = self._config.getint('Processing', 'ADJUSTMENT_INTERVAL', fallback=60)
         self.QUEUE_SIZE_THRESHOLD = self._config.getint('Processing', 'QUEUE_SIZE_THRESHOLD', fallback=10000)
         self.MAX_QUEUE_SIZE = self._config.getint('Processing', 'MAX_QUEUE_SIZE', fallback=100000)
-        self.TIME_WINDOW_HOURS = self._config.getfloat('Processing', 'TIME_WINDOW_HOURS', fallback=8.0)
         self.QUEUE_EMPTY_SLEEP_TIME = float(self._config.get('Processing', 'QUEUE_EMPTY_SLEEP_TIME', fallback='0.1'))
         self.RATE_LIMIT_SLEEP_TIME = float(self._config.get('Processing', 'RATE_LIMIT_SLEEP_TIME', fallback='0.01'))
         
         # Logging settings
+        self.LOG_LEVEL = self._config.get('Logging', 'LOG_LEVEL', fallback='WARNING').upper()
         self.ENABLE_SAMPLE_LOGGING = self._config.getboolean('Logging', 'ENABLE_SAMPLE_LOGGING', fallback=False)
         self.SAMPLE_LOG_INTERVAL = self._config.getint('Logging', 'SAMPLE_LOG_INTERVAL', fallback=60)
         self.SAMPLE_LOG_LENGTH = self._config.getint('Logging', 'SAMPLE_LOG_LENGTH', fallback=1000)
@@ -93,6 +92,9 @@ class Config:
 
         if not self.SMA_HOST:
             raise ValueError("SMA_HOST is not set in settings.ini")
+
+        # Add this line
+        self.LOG_QUEUE_DB = self.STATE_DIR / 'log_queue.db'
 
     @property
     def RETAIN_DOWNLOADED_LOGS(self):

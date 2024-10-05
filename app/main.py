@@ -32,8 +32,15 @@ from health_reporter import HealthReporter
 from config import Config
 
 # Set up logging
-setup_logging()
-logger = get_logger('illumio_s3_processor')
+logger = setup_logging()
+
+# After initializing the Config object
+config = Config()
+
+# Set the log level
+logger.setLevel(logging.getLevelName(config.LOG_LEVEL))
+
+logger.critical(f"Application starting with log level: {logging.getLevelName(logger.level)}")
 
 # Global variables
 executor = None
@@ -120,7 +127,7 @@ def shutdown(s3_manager, log_processor, health_reporter):
         return
     shutdown_initiated = True
     
-    logger.info("Initiating shutdown...")
+    logger.info("Initiating shutdown process...")
     start_time = time.time()
 
     if s3_manager:
@@ -139,7 +146,7 @@ def shutdown(s3_manager, log_processor, health_reporter):
             if thread.is_alive():
                 logger.warning(f"Thread {thread.name} did not finish in time")
 
-    logger.info(f"Shutdown complete. Total time taken: {time.time() - start_time:.2f} seconds")
+    logger.critical(f"Application stopped. Total shutdown time: {time.time() - start_time:.2f} seconds")
 
 def cleanup():
     logger.info("Performing final cleanup...")
@@ -164,16 +171,23 @@ def cleanup():
     
     # Check for any active network connections
     try:
-        connections = process.net_connections()
+        if hasattr(process, 'connections'):
+            connections = process.connections()
+        else:
+            logger.warning("Unable to retrieve network connections: method not available")
+            connections = []
+
         if connections:
             logger.info("Active network connections:")
             for conn in connections:
                 logger.info(f"  {conn}")
-                if conn.status == 'CLOSE_WAIT':
+                if hasattr(conn, 'status') and conn.status == 'CLOSE_WAIT':
                     logger.warning(f"Connection in CLOSE_WAIT state: {conn}")
                     report_network_connection(conn)
     except psutil.AccessDenied:
         logger.warning("Unable to retrieve network connections due to access denied.")
+    except Exception as e:
+        logger.error(f"Error retrieving network connections: {e}")
 
     logger.info("Cleanup completed.")
 
@@ -245,6 +259,7 @@ def report_network_connection(conn):
         logger.error(f"Error while reporting network connection: {e}")
 
 def main():
+    logger.critical("Application starting up...")
     global executor, s3_manager, log_processor, health_reporter
 
     # Load configuration
@@ -283,7 +298,6 @@ def main():
             aws_access_key_id=config.AWS_ACCESS_KEY_ID,
             aws_secret_access_key=config.AWS_SECRET_ACCESS_KEY,
             s3_bucket_name=config.S3_BUCKET_NAME,
-            minutes=config.MINUTES,
             max_files_per_folder=config.MAX_FILES_PER_FOLDER,
             health_reporter=health_reporter,
             max_pool_connections=config.MAX_POOL_CONNECTIONS,
@@ -292,6 +306,7 @@ def main():
             config=config,
             stop_event=stop_event
         )
+        logger.info(f"S3Manager initialized. Will look back {config.TIME_WINDOW_HOURS} hours for S3 files.")
 
         executor = ThreadPoolExecutor(max_workers=config.MAX_WORKERS)
 
@@ -300,6 +315,8 @@ def main():
 
         s3_stats_thread = threading.Thread(target=update_health_reporter_s3_stats, args=(s3_manager, health_reporter, stop_event))
         s3_stats_thread.start()
+
+        logger.critical("Application started and ready for processing.")
 
         # Main processing loop
         while not stop_event.is_set():
@@ -328,6 +345,7 @@ def main():
     except Exception as e:
         logger.exception(f"Unhandled exception in main loop: {e}")
     finally:
+        logger.critical("Application shutting down...")
         shutdown(s3_manager, log_processor, health_reporter)
 
 def process_log_type(s3_manager, log_processor, health_reporter, config, log_type):
@@ -379,7 +397,7 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        logger.info("KeyboardInterrupt received. Initiating shutdown...")
+        logger.critical("KeyboardInterrupt received. Initiating shutdown...")
     except Exception as e:
         logger.exception(f"Unhandled exception: {e}")
     finally:

@@ -7,8 +7,28 @@ import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import configparser
+import json
+
+class JSONFormatter(logging.Formatter):
+    def format(self, record):
+        log_record = {
+            'timestamp': self.formatTime(record, self.datefmt),
+            'name': record.name,
+            'level': record.levelname,
+            'message': record.getMessage(),
+        }
+        if record.exc_info:
+            log_record['exc_info'] = self.formatException(record.exc_info)
+        return json.dumps(log_record)
+
+_logging_setup_done = False
+_root_logger = None
 
 def setup_logging():
+    global _logging_setup_done, _root_logger
+    if _logging_setup_done:
+        return _root_logger
+
     # Get the directory where the script is located
     script_dir = Path(__file__).parent
 
@@ -20,37 +40,45 @@ def setup_logging():
     log_level = config.get('Logging', 'LOG_LEVEL', fallback='INFO').upper()
     max_log_size = config.getint('Logging', 'MAX_LOG_SIZE', fallback=10485760)
     backup_count = config.getint('Logging', 'BACKUP_COUNT', fallback=5)
-    file_log_format = config.get('Logging', 'FILE_LOG_FORMAT', fallback='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    console_log_format = config.get('Logging', 'CONSOLE_LOG_FORMAT', fallback='%(asctime)s - %(levelname)s - %(message)s')
 
     # Set up the root logger with the specified log level
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.getLevelName(log_level))
+    _root_logger = logging.getLogger()
+    _root_logger.setLevel(logging.getLevelName(log_level))
 
     # Remove all existing handlers to avoid duplication
-    for handler in root_logger.handlers[:]:
-        root_logger.removeHandler(handler)
+    for handler in _root_logger.handlers[:]:
+        _root_logger.removeHandler(handler)
 
-    # Create formatters
-    file_formatter = logging.Formatter(file_log_format)
-    console_formatter = logging.Formatter(console_log_format)
+    # Create JSON formatter
+    json_formatter = JSONFormatter()
 
     # Define the log folder
     log_folder = script_dir / config.get('Paths', 'LOG_FOLDER', fallback='logs')
     log_folder.mkdir(parents=True, exist_ok=True)
 
-    # Set up file handler
-    log_file = log_folder / 'app.log'
-    file_handler = RotatingFileHandler(log_file, maxBytes=max_log_size, backupCount=backup_count)
-    file_handler.setFormatter(file_formatter)
-    root_logger.addHandler(file_handler)
+    # Set up JSON file handler
+    json_log_file = log_folder / 'app.json'
+    json_file_handler = RotatingFileHandler(
+        json_log_file,
+        maxBytes=max_log_size,
+        backupCount=backup_count
+    )
+    json_file_handler.setFormatter(json_formatter)
+    _root_logger.addHandler(json_file_handler)
 
-    # Set up console handler
+    # Set up console handler with JSON formatting
     console_handler = logging.StreamHandler()
-    console_handler.setFormatter(console_formatter)
-    root_logger.addHandler(console_handler)
+    console_handler.setFormatter(json_formatter)
+    _root_logger.addHandler(console_handler)
 
-    return root_logger
+    # Log the current log level
+    _root_logger.critical(f"Logging initialized. Current log level: {logging.getLevelName(_root_logger.level)}")
+
+    _logging_setup_done = True
+    return _root_logger
 
 def get_logger(name):
-    return logging.getLogger(name)
+    global _root_logger
+    if not _logging_setup_done:
+        _root_logger = setup_logging()
+    return _root_logger.getChild(name)

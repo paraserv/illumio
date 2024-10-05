@@ -144,21 +144,23 @@ class HealthReporter:
     def log_info(self, message):
         if not self.enable_health_reporter:
             return
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_message = f"{timestamp} - INFO - {message}"
-        os.makedirs(os.path.dirname(self.health_log_file), exist_ok=True)
-        with open(self.health_log_file, 'a') as f:
-            f.write(f"{log_message}\n")
+        log_entry = {
+            'timestamp': datetime.now().isoformat(),
+            'level': 'INFO',
+            'message': message
+        }
+        self._write_to_health_log(json.dumps(log_entry))
         logger.info(f"Health Report: {message}")
 
     def log_error(self, message):
         if not self.enable_health_reporter:
             return
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_message = f"{timestamp} - ERROR - {message}"
-        os.makedirs(os.path.dirname(self.health_log_file), exist_ok=True)
-        with open(self.health_log_file, 'a') as f:
-            f.write(f"{log_message}\n")
+        log_entry = {
+            'timestamp': datetime.now().isoformat(),
+            'level': 'ERROR',
+            'message': message
+        }
+        self._write_to_health_log(json.dumps(log_entry))
         logger.error(f"Health Report: {message}")
 
     @staticmethod
@@ -284,7 +286,7 @@ class HealthReporter:
 
     def _write_to_health_log(self, message):
         with open(self.health_log_file, 'a') as f:
-            f.write(f"{datetime.now().isoformat()} - {message}\n")
+            f.write(f"{message}\n")
 
     def _ensure_log_directory(self):
         self.health_log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -299,10 +301,10 @@ class HealthReporter:
     def update_s3_stats(self, stats):
         with self.lock:
             self.s3_stats = stats
-            self.log_s3_stats(f"S3 Stats: Discovered: {stats['files_discovered']}, "
-                              f"Downloaded: {stats['files_downloaded']}, "
-                              f"Processed: {stats['files_processed']}, "
-                              f"Logs extracted: {stats['logs_extracted']}")
+            self.log_info(f"S3 Operations: S3 Stats: Discovered: {stats['files_discovered']}, "
+                          f"Downloaded: {stats['files_downloaded']}, "
+                          f"Processed: {stats['files_processed']}, "
+                          f"Logs extracted: {stats['logs_extracted']}")
 
     def update_log_processor_stats(self, stats):
         with self.log_processor_stats_lock:

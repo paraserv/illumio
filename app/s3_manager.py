@@ -40,17 +40,15 @@ class S3Manager:
         aws_access_key_id,
         aws_secret_access_key,
         s3_bucket_name,
-        minutes,
         max_files_per_folder,
         health_reporter,
         max_pool_connections,
         state_file,
         downloaded_files_folder,
-        config: Config,
-        stop_event: threading.Event
+        config,
+        stop_event
     ):
         self.s3_bucket_name = s3_bucket_name
-        self.minutes = minutes
         self.max_files_per_folder = max_files_per_folder
         self.health_reporter = health_reporter
         self.state_file = Path(state_file)
@@ -84,6 +82,7 @@ class S3Manager:
         
         self.config = config  # Store the config object
         self.time_window_hours = config.TIME_WINDOW_HOURS
+        logger.info(f"S3Manager initialized with TIME_WINDOW_HOURS: {self.time_window_hours}")
 
         self.last_ingestion_check = datetime.now(pytz.UTC)
         self.last_ingestion_count = 0
@@ -113,11 +112,10 @@ class S3Manager:
         }
         self.last_stats_update = time.time()
 
-        self.MINUTES = minutes
         self.MAX_FILES_PER_FOLDER = max_files_per_folder
         self.stop_event = stop_event
 
-        logger.info(f"Processing S3 logs with settings: MINUTES={self.MINUTES}, MAX_FILES_PER_FOLDER={self.MAX_FILES_PER_FOLDER}")
+        logger.info(f"Processing S3 logs with settings: TIME_WINDOW_HOURS={self.time_window_hours}, MAX_FILES_PER_FOLDER={self.MAX_FILES_PER_FOLDER}")
 
         self.current_operation = None
         self.shutdown_event = threading.Event()
@@ -379,10 +377,6 @@ class S3Manager:
                 f"Processed: {self.s3_stats['files_processed']}, "
                 f"Logs extracted: {self.s3_stats['logs_extracted']}"
             )
-            try:
-                self.health_reporter.log_s3_stats(stats_message)
-            except Exception as e:
-                logger.error(f"Failed to log S3 stats: {e}")
             self.last_stats_update = current_time
         return self.s3_stats.copy()
 

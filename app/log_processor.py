@@ -211,18 +211,28 @@ class LogProcessor:
     def _send_log(self, log_line, log_type):
         max_retries = 5
         retry_delay = 1  # in seconds
+        failure_logged = False
 
         for attempt in range(max_retries):
             try:
                 if self.send_to_siem(log_line, log_type):
+                    if failure_logged:
+                        logger.info(f"Successfully sent log after {attempt + 1} attempts")
                     return True
                 else:
+                    if not failure_logged:
+                        logger.error(f"Failed to send log. Starting retry attempts.")
+                        failure_logged = True
                     logger.error(f"Attempt {attempt + 1}: Failed to send log.")
             except Exception as e:
-                logger.error(f"Exception in _send_log: {e}")
-                self.health_reporter.report_error(f"Exception in _send_log: {e}", log_type)
+                if not failure_logged:
+                    logger.error(f"Exception in _send_log: {e}")
+                    self.health_reporter.report_error(f"Exception in _send_log: {e}", log_type)
+                    failure_logged = True
+                logger.error(f"Attempt {attempt + 1}: Exception in _send_log: {e}")
             
             if attempt < max_retries - 1:
+                logger.info(f"Waiting {retry_delay} seconds before next attempt")
                 time.sleep(retry_delay)
                 retry_delay *= 2  # Exponential backoff
 
