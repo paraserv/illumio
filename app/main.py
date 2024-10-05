@@ -268,7 +268,7 @@ def main():
     # Use the paths from the config, ensuring they are Path objects
     state_file = Path(config.STATE_FILE)
     download_folder = Path(config.STATE_DIR) / 'downloads'
-    log_folder = Path(config.LOG_FOLDER)
+    log_folder = config.LOG_DIR
     health_report_log_file = Path(config.HEALTH_REPORT_LOG_FILE)
 
     # Ensure directories exist

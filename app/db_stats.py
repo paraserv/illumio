@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timedelta
 import os
 import sys
+from config import Config
 
 # Add this as a global variable at the top of the file
 queue_stats_start_time = time.time()
@@ -201,9 +202,8 @@ def main():
     if args.db_path:
         db_path = Path(args.db_path).resolve()
     else:
-        # Determine the path to log_queue.db based on the script's location
-        script_dir = Path(__file__).resolve().parent
-        db_path = script_dir / "state" / "log_queue.db"
+        config = Config()
+        db_path = config.LOG_QUEUE_DB
 
     if not db_path.exists():
         print(f"Error: Database file not found at {db_path}")

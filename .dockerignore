@@ -15,8 +15,9 @@ __pycache__/
 .DS_Store
 
 # Ignore logs and temporary files
-*.log
+state/
 logs/
+*.log
 *.bak
 *.tmp
 *.orig

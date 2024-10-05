@@ -38,15 +38,32 @@ class Config:
         self.POLL_INTERVAL = self._config.getint('S3', 'POLL_INTERVAL', fallback=10)
         self.TIME_WINDOW_HOURS = self._config.getfloat('S3', 'TIME_WINDOW_HOURS', fallback=12.0)
         
-        # Paths
-        self.APP_DIR = Path(__file__).parent
-        self.STATE_DIR = self.APP_DIR / 'state'
+        # Determine if we're running in a container
+        self.IN_CONTAINER = os.environ.get('IN_CONTAINER', 'false').lower() == 'true'
+
+        # Set base directories
+        if self.IN_CONTAINER:
+            self.BASE_DIR = Path('/')
+        else:
+            self.BASE_DIR = Path(__file__).parent.parent  # Go up one level from the script directory
+
+        # Set STATE_DIR and LOG_DIR
+        self.STATE_DIR = Path(os.getenv('STATE_DIR', self.BASE_DIR / 'state'))
+        self.LOG_DIR = Path(os.getenv('LOG_DIR', self.BASE_DIR / 'logs'))
+
+        # Ensure directories exist
         self.STATE_DIR.mkdir(parents=True, exist_ok=True)
+        self.LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Update paths
         self.STATE_FILE = self.STATE_DIR / self._config.get('Paths', 'STATE_FILE', fallback='state.json')
-        self.LOG_FOLDER = self.APP_DIR / self._config.get('Paths', 'LOG_FOLDER', fallback='logs')
-        self.APP_LOG_FILE = self.LOG_FOLDER / self._config.get('Logging', 'APP_LOG_FILE', fallback='app.json')
-        self.HEALTH_REPORT_LOG_FILE = self.LOG_FOLDER / self._config.get('Logging', 'HEALTH_REPORT_LOG_FILE', fallback='health_report.json')
-        
+        self.APP_LOG_FILE = self.LOG_DIR / self._config.get('Logging', 'APP_LOG_FILE', fallback='app.json')
+        self.HEALTH_REPORT_LOG_FILE = self.LOG_DIR / self._config.get('Logging', 'HEALTH_REPORT_LOG_FILE', fallback='health_report.json')
+        self.LOG_QUEUE_DB = self.STATE_DIR / 'log_queue.db'
+
+        # Add this line to maintain compatibility with existing code
+        self.LOG_FOLDER = self.LOG_DIR
+
         # Health Reporting
         self.HEARTBEAT_INTERVAL = self._config.getfloat('HealthReporting', 'HEARTBEAT_INTERVAL', fallback=15.0)
         self.SUMMARY_INTERVAL = self._config.getfloat('HealthReporting', 'SUMMARY_INTERVAL', fallback=20.0)

@@ -21,6 +21,7 @@ import pytz
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 from dotenv import load_dotenv
+from config import Config
 
 # Get the directory where the script is located
 script_dir = Path(__file__).parent
@@ -47,6 +48,10 @@ config.read(script_dir / 'settings.ini')
 MINUTES = config.getint('S3', 'MINUTES', fallback=10)
 MAX_FILES_PER_FOLDER = config.getint('S3', 'MAX_FILES_PER_FOLDER', fallback=5)
 EXTRACT_LOG_LINES = config.getint('S3', 'EXTRACT_LOG_LINES', fallback=0)
+
+config = Config()
+STATE_DIR = config.STATE_DIR
+state_file = STATE_DIR / 's3_analyzer_state.json'
 
 def list_s3_contents(bucket_name, minutes=10, max_files_per_folder=5, extract_lines=0, count_only=True):
     """

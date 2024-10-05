@@ -12,30 +12,25 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./
 
+ENV IN_CONTAINER=true
 ENV BASE_FOLDER=/app
-ENV DOWNLOADED_FILES_FOLDER=illumio
-ENV LOG_FOLDER=logs
+ENV STATE_DIR=/state
+ENV LOG_DIR=/logs
 ENV PYTHONUNBUFFERED=1
 
 # Create directories with appropriate permissions
-RUN mkdir -p $DOWNLOADED_FILES_FOLDER $LOG_FOLDER && \
-    chmod 755 $DOWNLOADED_FILES_FOLDER $LOG_FOLDER
+RUN mkdir -p $STATE_DIR $LOG_DIR && \
+    chmod 755 $STATE_DIR $LOG_DIR
 
 # Ensure main.py is executable
 RUN chmod +x main.py
 
-# **Comment out the non-root user creation and switch to root user**
-# ARG USER_ID=1000
-# ARG GROUP_ID=1000
-# RUN group_name=$(getent group $GROUP_ID | cut -d: -f1) || group_name=appuser && \
-#     if ! getent group $GROUP_ID > /dev/null; then \
-#         addgroup --gid $GROUP_ID $group_name; \
-#     fi && \
-#     adduser --disabled-password --gecos '' --uid $USER_ID --gid $GROUP_ID appuser && \
-#     chown -R appuser:$GROUP_ID /app
-
-# **Remove the USER directive to run as root**
-# USER appuser
+# Add a health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+  CMD python -c "import os, sys; sys.exit(0 if os.path.exists('/state/log_queue.db') else 1)"
 
 # Set the entrypoint to execute main.py
 ENTRYPOINT ["./main.py"]
+
+# Add a CMD instruction for default arguments (if any)
+CMD []
