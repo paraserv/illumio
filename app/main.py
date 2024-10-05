@@ -266,18 +266,15 @@ def main():
     config = Config()
 
     # Use the paths from the config, ensuring they are Path objects
-    state_file = Path(config.STATE_FILE)
-    download_folder = Path(config.STATE_DIR) / 'downloads'
+    state_file = config.STATE_FILE
+    download_folder = config.STATE_DIR / 'downloads'
     log_folder = config.LOG_DIR
-    health_report_log_file = Path(config.HEALTH_REPORT_LOG_FILE)
+    health_report_log_file = config.HEALTH_REPORT_LOG_FILE
 
     # Ensure directories exist
     download_folder.mkdir(parents=True, exist_ok=True)
     log_folder.mkdir(parents=True, exist_ok=True)
     health_report_log_file.parent.mkdir(parents=True, exist_ok=True)
-
-    # Ensure the state directory exists
-    config.STATE_DIR.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"Ensuring download folder exists: {download_folder}")
     logger.info(f"Ensuring log folder exists: {log_folder}")

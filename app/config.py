@@ -44,12 +44,18 @@ class Config:
         # Set base directories
         if self.IN_CONTAINER:
             self.BASE_DIR = Path('/')
+            self.APP_DIR = Path('/app')
         else:
             self.BASE_DIR = Path(__file__).parent.parent  # Go up one level from the script directory
+            self.APP_DIR = Path(__file__).parent  # The directory containing this script
 
         # Set STATE_DIR and LOG_DIR
-        self.STATE_DIR = Path(os.getenv('STATE_DIR', self.BASE_DIR / 'state'))
-        self.LOG_DIR = Path(os.getenv('LOG_DIR', self.BASE_DIR / 'logs'))
+        if self.IN_CONTAINER:
+            self.STATE_DIR = Path(os.getenv('STATE_DIR', '/state'))
+            self.LOG_DIR = Path(os.getenv('LOG_DIR', '/logs'))
+        else:
+            self.STATE_DIR = self.APP_DIR / 'state'
+            self.LOG_DIR = self.APP_DIR / 'logs'
 
         # Ensure directories exist
         self.STATE_DIR.mkdir(parents=True, exist_ok=True)
