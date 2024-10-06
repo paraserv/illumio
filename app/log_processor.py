@@ -405,7 +405,7 @@ class LogProcessor:
                 'result': safe_get(log_entry, 'status'),
                 'severity': safe_get(log_entry, 'severity'),
                 'action': safe_get(log_entry, 'action'),
-                'vendorinfo': safe_get(log_entry, 'event_type'),
+                'vmid': safe_get(log_entry, 'event_type'),
             }
             if log_entry.get('notifications'):
                 notification = log_entry['notifications'][0]
