@@ -265,23 +265,8 @@ def main():
     # Load configuration
     config = Config()
 
-    # Use the paths from the config, ensuring they are Path objects
-    state_file = config.STATE_FILE
-    download_folder = config.STATE_DIR / 'downloads'
-    log_folder = config.LOG_DIR
-    health_report_log_file = config.HEALTH_REPORT_LOG_FILE
-
-    # Ensure directories exist
-    download_folder.mkdir(parents=True, exist_ok=True)
-    log_folder.mkdir(parents=True, exist_ok=True)
-    health_report_log_file.parent.mkdir(parents=True, exist_ok=True)
-
-    logger.info(f"Ensuring download folder exists: {download_folder}")
-    logger.info(f"Ensuring log folder exists: {log_folder}")
-    logger.info(f"Health report log file: {health_report_log_file}")
-
-    # List of log types to process
-    log_types = ['auditable_events', 'summaries']
+    # Use log types from config
+    log_types = config.LOG_TYPES
 
     try:
         # Initialize components
@@ -298,8 +283,7 @@ def main():
             max_files_per_folder=config.MAX_FILES_PER_FOLDER,
             health_reporter=health_reporter,
             max_pool_connections=config.MAX_POOL_CONNECTIONS,
-            state_file=state_file,
-            downloaded_files_folder=download_folder,
+            state_file=config.STATE_FILE,
             config=config,
             stop_event=stop_event
         )

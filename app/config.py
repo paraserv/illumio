@@ -20,12 +20,17 @@ class Config:
         # Load .env file
         load_dotenv()
 
-        # Load settings.ini
+        # Initialize the configparser
         self._config = configparser.ConfigParser()
-        script_dir = Path(__file__).parent
-        settings_file = script_dir / 'settings.ini'
-        self._config.read(settings_file)
 
+        # Load settings.ini
+        script_dir = Path(__file__).parent
+        settings_file = script_dir.parent / 'settings.ini'  # Look for settings.ini in the project root
+        self._config.read(settings_file)
+        
+        if not self._config.sections():
+            raise FileNotFoundError(f"Settings file not found or empty: {settings_file}")
+        
         # Load configuration from environment variables or settings.ini
         self.AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
         self.AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
@@ -37,25 +42,14 @@ class Config:
         self.MAX_POOL_CONNECTIONS = self._config.getint('S3', 'MAX_POOL_CONNECTIONS', fallback=10)
         self.POLL_INTERVAL = self._config.getint('S3', 'POLL_INTERVAL', fallback=10)
         self.TIME_WINDOW_HOURS = self._config.getfloat('S3', 'TIME_WINDOW_HOURS', fallback=12.0)
-        
-        # Determine if we're running in a container
-        self.IN_CONTAINER = os.environ.get('IN_CONTAINER', 'false').lower() == 'true'
 
         # Set base directories
-        if self.IN_CONTAINER:
-            self.BASE_DIR = Path('/')
-            self.APP_DIR = Path('/app')
-        else:
-            self.BASE_DIR = Path(__file__).parent.parent  # Go up one level from the script directory
-            self.APP_DIR = Path(__file__).parent  # The directory containing this script
+        self.BASE_DIR = Path(__file__).parent.parent  # Go up one level from the script directory
+        self.APP_DIR = Path(__file__).parent  # The directory containing this script
 
         # Set STATE_DIR and LOG_DIR
-        if self.IN_CONTAINER:
-            self.STATE_DIR = Path(os.getenv('STATE_DIR', '/state'))
-            self.LOG_DIR = Path(os.getenv('LOG_DIR', '/logs'))
-        else:
-            self.STATE_DIR = self.APP_DIR / 'state'
-            self.LOG_DIR = self.APP_DIR / 'logs'
+        self.STATE_DIR = self.BASE_DIR / 'state'
+        self.LOG_DIR = self.BASE_DIR / 'logs'
 
         # Ensure directories exist
         self.STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -66,6 +60,10 @@ class Config:
         self.APP_LOG_FILE = self.LOG_DIR / self._config.get('Logging', 'APP_LOG_FILE', fallback='app.json')
         self.HEALTH_REPORT_LOG_FILE = self.LOG_DIR / self._config.get('Logging', 'HEALTH_REPORT_LOG_FILE', fallback='health_report.json')
         self.LOG_QUEUE_DB = self.STATE_DIR / 'log_queue.db'
+        self.DOWNLOADS_DIR = self.STATE_DIR / 'downloads'
+
+        # Ensure downloads directory exists
+        self.DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
         # Add this line to maintain compatibility with existing code
         self.LOG_FOLDER = self.LOG_DIR
@@ -76,6 +74,9 @@ class Config:
         self.ENABLE_HEALTH_REPORTER = self._config.getboolean('HealthReporting', 'ENABLE_HEALTH_REPORTER', fallback=True)
         
         # Syslog settings
+        if 'Syslog' not in self._config.sections():
+            raise ValueError("Syslog section missing from settings.ini")
+        
         self.SMA_HOST = self._config.get('Syslog', 'SMA_HOST')
         self.SMA_PORT = self._config.getint('Syslog', 'SMA_PORT', fallback=514)
         self.MAX_MESSAGES_PER_SECOND = self._config.getint('Syslog', 'MAX_MESSAGES_PER_SECOND', fallback=1000)
@@ -87,7 +88,8 @@ class Config:
         
         # General settings
         self.BEATNAME = self._config.get('General', 'BEATNAME', fallback='IllumioS3')
-        
+        self.LOG_TYPES = self._config.get('General', 'LOG_TYPES', fallback='auditable_events,summaries').split(',')
+
         # Processing settings
         self.MAX_WORKERS = self._config.getint('Processing', 'MAX_WORKERS', fallback=4)
         self.MIN_WORKERS = self._config.getint('Processing', 'MIN_WORKERS', fallback=1)
@@ -115,9 +117,6 @@ class Config:
 
         if not self.SMA_HOST:
             raise ValueError("SMA_HOST is not set in settings.ini")
-
-        # Add this line
-        self.LOG_QUEUE_DB = self.STATE_DIR / 'log_queue.db'
 
     @property
     def RETAIN_DOWNLOADED_LOGS(self):

@@ -27,7 +27,6 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 # Local application imports
 from logger_config import get_logger
-from config import Config
 
 # Typing imports
 from typing import List, Dict, Any
@@ -44,15 +43,15 @@ class S3Manager:
         health_reporter,
         max_pool_connections,
         state_file,
-        downloaded_files_folder,
         config,
         stop_event
     ):
+        self.config = config  # Store the config object as an instance attribute
         self.s3_bucket_name = s3_bucket_name
         self.max_files_per_folder = max_files_per_folder
         self.health_reporter = health_reporter
         self.state_file = Path(state_file)
-        self.processed_keys = {'auditable_events': {}, 'summaries': {}}
+        self.processed_keys = {log_type: {} for log_type in config.LOG_TYPES}
         self.load_state()
 
         boto_config = BotoConfig(
@@ -67,20 +66,9 @@ class S3Manager:
         self.s3 = self.session.client('s3', config=boto_config)
 
         self.queue_size_threshold = config.QUEUE_SIZE_THRESHOLD
-        self.downloaded_files_folder = Path(config.STATE_DIR) / 'downloads'
+        self.downloaded_files_folder = config.DOWNLOADS_DIR
         self.downloaded_files_folder.mkdir(parents=True, exist_ok=True)
 
-        # Load settings from settings.ini
-        settings_config = configparser.ConfigParser()
-        script_dir = Path(__file__).parent
-        settings_file = script_dir / 'settings.ini'
-        settings_config.read(settings_file)
-
-        self.baseline_period = settings_config.getfloat('S3', 'BASELINE_PERIOD', fallback=300.0)
-        self.MIN_TIMEFRAME = settings_config.getfloat('Processing', 'MIN_TIMEFRAME', fallback=0.25)
-        self.MAX_TIMEFRAME = settings_config.getfloat('Processing', 'MAX_TIMEFRAME', fallback=24.0)
-        
-        self.config = config  # Store the config object
         self.time_window_hours = config.TIME_WINDOW_HOURS
         logger.info(f"S3Manager initialized with TIME_WINDOW_HOURS: {self.time_window_hours}")
 
@@ -362,10 +350,10 @@ class S3Manager:
                 )
             except Exception as e:
                 logger.error(f"Failed to load state file {self.state_file}: {e}")
-                self.processed_keys = {'auditable_events': {}, 'summaries': {}}
+                self.processed_keys = {log_type: {} for log_type in self.config.LOG_TYPES}
         else:
             logger.info(f"No existing state file found at {self.state_file}. Starting fresh.")
-            self.processed_keys = {'auditable_events': {}, 'summaries': {}}
+            self.processed_keys = {log_type: {} for log_type in self.config.LOG_TYPES}
 
     def update_s3_stats(self):
         current_time = time.time()

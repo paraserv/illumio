@@ -8,6 +8,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import configparser
 import json
+import os
 
 class JSONFormatter(logging.Formatter):
     def format(self, record):
@@ -52,8 +53,8 @@ def setup_logging():
     # Create JSON formatter
     json_formatter = JSONFormatter()
 
-    # Define the log folder
-    log_folder = script_dir / config.get('Paths', 'LOG_FOLDER', fallback='logs')
+    # Use the LOG_DIR environment variable or fall back to the default
+    log_folder = Path(os.environ.get('LOG_DIR', script_dir.parent / config.get('Paths', 'LOG_FOLDER', fallback='logs')))
     log_folder.mkdir(parents=True, exist_ok=True)
 
     # Set up JSON file handler
@@ -73,6 +74,10 @@ def setup_logging():
 
     # Log the current log level
     _root_logger.critical(f"Logging initialized. Current log level: {logging.getLevelName(_root_logger.level)}")
+
+    # Print log folder and JSON log file paths for debugging
+    print(f"Log folder path: {log_folder}")
+    print(f"JSON log file path: {json_log_file}")
 
     _logging_setup_done = True
     return _root_logger
