@@ -35,3 +35,7 @@ docker-compose.yml
 
 # Ensure state.json is not ignored
 #!state.json
+
+# Ignore .gz .tar files
+*.gz
+*.tar
