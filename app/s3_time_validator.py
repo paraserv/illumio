@@ -1,3 +1,8 @@
+#!/usr/bin/env python3
+"""
+Standalone script to validate the time difference between local time and S3 time.
+"""
+
 import os
 import datetime
 import statistics

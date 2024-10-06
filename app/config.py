@@ -118,6 +118,14 @@ class Config:
         if not self.SMA_HOST:
             raise ValueError("SMA_HOST is not set in settings.ini")
 
+        # Maintenance settings
+        self.ENABLE_MAINTENANCE = self._config.getboolean('Maintenance', 'ENABLE_MAINTENANCE', fallback=True)
+        self.MAINTENANCE_INTERVAL = self._config.getint('Maintenance', 'MAINTENANCE_INTERVAL', fallback=86400)
+        self.LOG_CLEANUP_AGE = self._config.getint('Maintenance', 'LOG_CLEANUP_AGE', fallback=30)
+        self.STATE_FILE_BACKUP_INTERVAL = self._config.getint('Maintenance', 'STATE_FILE_BACKUP_INTERVAL', fallback=86400)
+        self.DB_VACUUM_INTERVAL = self._config.getint('Maintenance', 'DB_VACUUM_INTERVAL', fallback=604800)
+        self.DB_CLEANUP_AGE = self._config.getint('Maintenance', 'DB_CLEANUP_AGE', fallback=30)
+
     @property
     def RETAIN_DOWNLOADED_LOGS(self):
         return self._config.getboolean('Processing', 'RETAIN_DOWNLOADED_LOGS', fallback=False)

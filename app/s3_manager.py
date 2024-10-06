@@ -137,6 +137,26 @@ class S3Manager:
             self.last_ingestion_count = new_logs_count
         return self.current_ingestion_rate
 
+    @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=60))
+    def list_objects(self, prefix=''):
+        try:
+            response = self.s3.list_objects_v2(Bucket=self.s3_bucket_name, Prefix=prefix)
+            return response.get('Contents', [])
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'RequestTimeTooSkewed':
+                logger.warning("Time skew detected. Retrying S3 operation.")
+            else:
+                logger.error(f"S3 operation failed: {str(e)}")
+            raise
+
+    @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=60))
+    def download_object(self, key):
+        try:
+            return self.s3.get_object(Bucket=self.s3_bucket_name, Key=key)
+        except ClientError as e:
+            logger.error(f"Failed to download S3 object {key}: {str(e)}")
+            raise
+
     def get_new_s3_objects(
         self,
         log_type: str,

@@ -75,9 +75,9 @@ def setup_logging():
     # Log the current log level
     _root_logger.critical(f"Logging initialized. Current log level: {logging.getLevelName(_root_logger.level)}")
 
-    # Print log folder and JSON log file paths for debugging
-    print(f"Log folder path: {log_folder}")
-    print(f"JSON log file path: {json_log_file}")
+    # Log folder and JSON log file paths using the JSON formatter
+    _root_logger.info(f"Log folder path: {log_folder}")
+    _root_logger.info(f"JSON log file path: {json_log_file}")
 
     _logging_setup_done = True
     return _root_logger

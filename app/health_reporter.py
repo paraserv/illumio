@@ -309,3 +309,16 @@ class HealthReporter:
     def update_log_processor_stats(self, stats):
         with self.log_processor_stats_lock:
             self.log_processor_stats = stats
+
+    def report_time_sync(self, time_sync_info):
+        with self.lock:
+            log_entry = {
+                'timestamp': datetime.now().isoformat(),
+                'level': 'INFO',
+                'message': 'Time Sync Information',
+                'time_sync_info': time_sync_info
+            }
+            self._write_to_health_log(json.dumps(log_entry, indent=2))
+            
+            # We don't need to log the detailed info to the main app log anymore
+            logger.info("Time sync information logged to health report.")

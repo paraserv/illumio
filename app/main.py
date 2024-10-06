@@ -19,6 +19,7 @@ import atexit
 import psutil
 import traceback
 import socket
+import sqlite3
 
 # Third-party imports
 import pytz
@@ -30,6 +31,7 @@ from log_processor import LogProcessor
 from logger_config import setup_logging, get_logger
 from health_reporter import HealthReporter
 from config import Config
+from s3_ntp_check import check_time_sync
 
 # Set up logging
 logger = setup_logging()
@@ -258,6 +260,30 @@ def report_network_connection(conn):
     except Exception as e:
         logger.error(f"Error while reporting network connection: {e}")
 
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+def main_loop_iteration(s3_manager, log_processor, health_reporter, config):
+    try:
+        # Check NTP and AWS time synchronization
+        if not check_time_sync(config_path='app/settings.ini', health_reporter=health_reporter):
+            logger.warning("Time sync check failed, but continuing operations.")
+
+        for log_type in config.LOG_TYPES:
+            if stop_event.is_set():
+                break
+            logger.info(f"Processing log type: {log_type}")
+            processed = process_log_type(s3_manager, log_processor, health_reporter, config, log_type)
+            if processed:
+                logger.info(f"Processed {log_type} logs")
+            else:
+                logger.info(f"No {log_type} logs to process at this time")
+
+        logger.debug("Finished processing all log types")
+
+    except Exception as e:
+        logger.error(f"An error occurred in the main loop: {str(e)}")
+        logger.info("Retrying main loop iteration...")
+        raise  # This will trigger the retry
+
 def main():
     logger.critical("Application starting up...")
     global executor, s3_manager, log_processor, health_reporter
@@ -297,26 +323,23 @@ def main():
         s3_stats_thread = threading.Thread(target=update_health_reporter_s3_stats, args=(s3_manager, health_reporter, stop_event))
         s3_stats_thread.start()
 
+        maintenance_thread = threading.Thread(target=perform_maintenance, args=(config, stop_event))
+        maintenance_thread.start()
+
         logger.critical("Application started and ready for processing.")
 
         # Main processing loop
         while not stop_event.is_set():
-            logger.debug("Starting new iteration of main processing loop")
-            
-            for log_type in log_types:
-                if stop_event.is_set():
-                    break
-                logger.info(f"Processing log type: {log_type}")
-                processed = process_log_type(s3_manager, log_processor, health_reporter, config, log_type)
-                if processed:
-                    logger.info(f"Processed {log_type} logs")
-                else:
-                    logger.info(f"No {log_type} logs to process at this time")
+            try:
+                main_loop_iteration(s3_manager, log_processor, health_reporter, config)
+            except Exception as e:
+                logger.error(f"Main loop iteration failed after retries: {str(e)}")
+                logger.info("Waiting for 5 minutes before next attempt...")
+                time.sleep(300)  # Wait for 5 minutes before trying again
 
             if stop_event.is_set():
                 break
 
-            logger.debug("Finished processing all log types")
             logger.info(f"S3 file monitoring will wait for {config.POLL_INTERVAL} seconds before looking for new files")
             
             # Use wait instead of sleep to allow for immediate termination
@@ -361,6 +384,54 @@ def process_s3_object(s3_manager, log_processor, health_reporter, s3_object, log
         logger.info(f"Successfully processed: {s3_object['Key']}, Type: {log_type}, Logs extracted: {logs_extracted}")
     else:
         logger.warning(f"Failed to process: {s3_object['Key']}, Type: {log_type}, Logs extracted: {logs_extracted}")
+
+def perform_maintenance(config, stop_event):
+    while not stop_event.is_set():
+        try:
+            # Clean up old log files
+            cleanup_old_logs(config.LOG_DIR, max_age_days=30)
+
+            # Check and backup state file
+            backup_state_file(config.STATE_FILE)
+
+            # Optimize database
+            optimize_database(config.LOG_QUEUE_DB)
+
+            # Remove old processed entries
+            cleanup_old_entries(config.LOG_QUEUE_DB, max_age_days=30)
+
+        except Exception as e:
+            logger.error(f"Error during maintenance: {e}")
+
+        # Sleep for 24 hours before next maintenance
+        stop_event.wait(86400)
+
+def cleanup_old_logs(log_dir, max_age_days):
+    current_time = time.time()
+    for log_file in Path(log_dir).glob('*.log*'):
+        if (current_time - os.path.getmtime(log_file)) > (max_age_days * 86400):
+            os.remove(log_file)
+            logger.info(f"Removed old log file: {log_file}")
+
+def backup_state_file(state_file):
+    backup_file = f"{state_file}.bak"
+    Path(state_file).copy(backup_file)
+    logger.info(f"Backed up state file to {backup_file}")
+
+def optimize_database(db_path):
+    conn = sqlite3.connect(db_path)
+    conn.execute("VACUUM")
+    conn.close()
+    logger.info("Optimized database")
+
+def cleanup_old_entries(db_path, max_age_days):
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cutoff_time = int(time.time()) - (max_age_days * 86400)
+    cursor.execute("DELETE FROM log_queue WHERE id < ?", (cutoff_time,))
+    conn.commit()
+    conn.close()
+    logger.info(f"Removed {cursor.rowcount} old entries from database")
 
 if __name__ == "__main__":
     # Register signal handlers
