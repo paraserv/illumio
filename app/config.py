@@ -44,10 +44,8 @@ class Config:
         self.TIME_WINDOW_HOURS = self._config.getfloat('S3', 'TIME_WINDOW_HOURS', fallback=12.0)
 
         # Set base directories
-        self.BASE_DIR = Path(__file__).parent.parent  # Go up one level from the script directory
-        self.APP_DIR = Path(__file__).parent  # The directory containing this script
-
-        # Set STATE_DIR and LOG_DIR
+        self.BASE_DIR = Path(__file__).parent.parent  # This is the project root
+        self.APP_DIR = self.BASE_DIR / 'app'
         self.STATE_DIR = self.BASE_DIR / 'state'
         self.LOG_DIR = self.BASE_DIR / 'logs'
 
@@ -56,14 +54,18 @@ class Config:
         self.LOG_DIR.mkdir(parents=True, exist_ok=True)
 
         # Update paths
-        self.STATE_FILE = self.STATE_DIR / self._config.get('Paths', 'STATE_FILE', fallback='state.json')
-        self.APP_LOG_FILE = self.LOG_DIR / self._config.get('Logging', 'APP_LOG_FILE', fallback='app.json')
-        self.HEALTH_REPORT_LOG_FILE = self.LOG_DIR / self._config.get('Logging', 'HEALTH_REPORT_LOG_FILE', fallback='health_report.json')
+        self.STATE_FILE = self.STATE_DIR / 'state.json'
+        self.APP_LOG_FILE = self.LOG_DIR / 'app.json'
+        self.HEALTH_REPORT_LOG_FILE = self.LOG_DIR / 'health_report.json'
         self.LOG_QUEUE_DB = self.STATE_DIR / 'log_queue.db'
         self.DOWNLOADS_DIR = self.STATE_DIR / 'downloads'
+        self.QUEUE_DB_FILE = self.LOG_QUEUE_DB
 
         # Ensure downloads directory exists
         self.DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Add this line to create the QUEUE_DB_FILE attribute
+        self.QUEUE_DB_FILE = self.LOG_QUEUE_DB
 
         # Add this line to maintain compatibility with existing code
         self.LOG_FOLDER = self.LOG_DIR

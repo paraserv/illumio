@@ -35,12 +35,19 @@ def setup_logging():
 
     # Load settings
     config = configparser.ConfigParser(interpolation=None)  # Disable interpolation
-    config.read(script_dir / 'settings.ini')
+    config.read(script_dir.parent / 'settings.ini')
 
     # Get logging settings
     log_level = config.get('Logging', 'LOG_LEVEL', fallback='INFO').upper()
     max_log_size = config.getint('Logging', 'MAX_LOG_SIZE', fallback=10485760)
     backup_count = config.getint('Logging', 'BACKUP_COUNT', fallback=5)
+
+    # Use the LOG_FOLDER from settings.ini, falling back to a local path if not in a container
+    log_folder = Path(config.get('Paths', 'LOG_FOLDER', fallback='logs'))
+    if not log_folder.is_absolute():
+        log_folder = script_dir.parent / log_folder
+
+    log_folder.mkdir(parents=True, exist_ok=True)
 
     # Set up the root logger with the specified log level
     _root_logger = logging.getLogger()
@@ -52,10 +59,6 @@ def setup_logging():
 
     # Create JSON formatter
     json_formatter = JSONFormatter()
-
-    # Use the LOG_DIR environment variable or fall back to the default
-    log_folder = Path(os.environ.get('LOG_DIR', script_dir.parent / config.get('Paths', 'LOG_FOLDER', fallback='logs')))
-    log_folder.mkdir(parents=True, exist_ok=True)
 
     # Set up JSON file handler
     json_log_file = log_folder / 'app.json'

@@ -16,15 +16,15 @@ COPY settings.ini .
 ENV PYTHONUNBUFFERED=1
 
 # Create directories with appropriate permissions
-RUN mkdir -p /state/downloads /logs && \
-    chmod 755 /state /logs /state/downloads
+RUN mkdir -p state/downloads logs && \
+    chmod -R 777 state logs
 
 # Ensure main.py is executable
 RUN chmod +x app/main.py
 
 # Add a health check
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-  CMD python -c "import os, sys; sys.exit(0 if os.path.exists('/state/log_queue.db') else 1)"
+  CMD python -c "import os, sys; sys.exit(0 if os.path.exists('state/log_queue.db') and os.path.exists('logs/app.json') else 1)"
 
 # Set the entrypoint to execute main.py
 ENTRYPOINT ["python", "app/main.py"]

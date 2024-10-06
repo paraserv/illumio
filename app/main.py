@@ -20,6 +20,8 @@ import psutil
 import traceback
 import socket
 import sqlite3
+import configparser
+import shutil  # Add this import at the top of the file
 
 # Third-party imports
 import pytz
@@ -295,6 +297,11 @@ def main():
     log_types = config.LOG_TYPES
 
     try:
+        # Initialize queue database
+        queue_db_path = config.QUEUE_DB_FILE
+        logger.info(f"Initializing queue database at: {queue_db_path}")
+        conn = sqlite3.connect(queue_db_path)
+
         # Initialize components
         health_reporter = HealthReporter(config, stop_event)
         health_reporter.start()
@@ -391,9 +398,6 @@ def perform_maintenance(config, stop_event):
             # Clean up old log files
             cleanup_old_logs(config.LOG_DIR, max_age_days=30)
 
-            # Check and backup state file
-            backup_state_file(config.STATE_FILE)
-
             # Optimize database
             optimize_database(config.LOG_QUEUE_DB)
 
@@ -414,8 +418,11 @@ def cleanup_old_logs(log_dir, max_age_days):
             logger.info(f"Removed old log file: {log_file}")
 
 def backup_state_file(state_file):
+    if not os.path.exists(state_file):
+        logger.warning(f"State file {state_file} does not exist. Skipping backup.")
+        return
     backup_file = f"{state_file}.bak"
-    Path(state_file).copy(backup_file)
+    shutil.copy2(state_file, backup_file)
     logger.info(f"Backed up state file to {backup_file}")
 
 def optimize_database(db_path):
