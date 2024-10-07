@@ -84,11 +84,10 @@ The application is ideal for environments that require efficient log ingestion a
 
    - Configure the following sections:
      - **General Settings**: Application behavior, paths, and logging levels.
-     - **AWS S3 Configuration**: Bucket name, prefixes, and region.
      - **Syslog Settings**: SIEM IP address, port, protocol (TCP/UDP), and formatting options.
      - **Rate Limiting**: Control log processing and forwarding rates.
      - **Health Reporting**: Enable or disable health checks and reporting intervals.
-     - **NTP Settings**: Configure if time sync validation is important..
+     - **NTP Settings**: Configure if time sync validation is important.
    - **Important**: Avoid inline comments and ensure no extraneous whitespace.
 
 2. **Create an `.env` File**:
@@ -135,8 +134,7 @@ docker buildx build --platform linux/arm64 -t lrillumio:latest . --load
 - **Flags**:
   - `--load`: Loads the image into Docker after building (optional)
 
-```
-- **Note**: Ensure Docker Buildx is installed and set up correctly if using the buildx command.
+**Note**: Ensure Docker Buildx is installed and set up correctly if using the buildx command.
 
 #### Option 2: Traditional Docker Build
 
