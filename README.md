@@ -118,55 +118,33 @@ python app/main.py
 
 ### Building the Docker Image
 
-You have multiple options for building the Docker image, depending on your system architecture and requirements:
+You can build the Docker image for either amd64 or arm64 architecture:
 
-#### Option 1: Using Docker Buildx (Recommended for Multi-Platform Support)
+#### For amd64 (Intel/AMD 64-bit systems, including Rocky 9/RHEL 9):
 
-Docker Buildx allows you to build images for multiple platforms. 
-
-1. Build for amd64 architecture and load the image into Docker:
-   ```bash
-   docker buildx build --platform linux/amd64 -t lrillumio:latest . --load
-   ```
-
-2. Build for multiple platforms (creates tarballs):
-   ```bash
-   docker buildx build --platform linux/amd64,linux/arm64 -t lrillumio:latest . --output type=tar,dest=lrillumio.tar
-   ```
-
-   This command creates a tarball containing images for both amd64 and arm64 architectures.
-
-- **Platform Options**:
-  - `linux/amd64`: For Intel/AMD 64-bit systems (most common, includes Rocky 9/RHEL 9)
-  - `linux/arm64`: For ARM 64-bit systems (e.g., Apple Silicon M1/M2/M3/M4, some AWS instances)
-  - Add or remove platforms as needed, separated by commas
-
-- **Flags**:
-  - `--load`: Loads the image into Docker after building (only works for single-platform builds)
-  - `--output`: Specifies the output format and destination
-
-#### Option 2: Building for Specific Architectures
-
-For Rocky 9/RHEL 9 (and most x86_64 Linux distributions):
 ```bash
 docker buildx build --platform linux/amd64 -t lrillumio:latest . --load
 ```
 
-For ARM-based macOS (Apple Silicon):
+#### For arm64 (Apple Silicon M1/M2/M3/M4, some AWS instances):
+
 ```bash
-docker buildx build --platform linux/arm64/v8 -t lrillumio:latest . --load
+docker buildx build --platform linux/arm64 -t lrillumio:latest . --load
+```
+
+- **Flags**:
+  - `--load`: Loads the image into Docker after building (optional)
+
 ```
 - **Note**: Ensure Docker Buildx is installed and set up correctly if using the buildx command.
 
-#### Option 3: Traditional Docker Build
+#### Option 2: Traditional Docker Build
 
-If you don't need multi-platform support or don't have Buildx set up, you can use the traditional `docker build` command:
+If you don't have Buildx set up, you can use the traditional `docker build` command, which will build for the current system's architecture:
 
 ```bash
 docker build -t lrillumio:latest .
 ```
-
-This will build the image for your current system's architecture. (add --load if you want to load the image into Docker on the current system)
 
 #### Validating the Build
 
@@ -183,7 +161,43 @@ To inspect the architecture of the built image:
 docker inspect lrillumio:latest --format '{{.Architecture}}'
 ```
 
-This will output the architecture (e.g., `amd64` or `arm64`).
+#### Creating and Distributing Image Tarballs
+
+On the development system:
+
+1. Save the Docker image as a tarball and compress it:
+   ```bash
+   docker save lrillumio:latest | gzip > lrillumio_latest.tar.gz
+   ```
+
+   This creates a compressed file `lrillumio_latest.tar.gz` which is smaller and easier to distribute.
+
+2. Transfer the `lrillumio_latest.tar.gz` file to the target system using your preferred method (e.g., scp, sftp).
+
+On the target system (e.g., Rocky 9 or RHEL 9):
+
+1. Load the compressed image into Docker:
+   ```bash
+   gunzip -c lrillumio_latest.tar.gz | docker load
+   ```
+
+   This command decompresses the file and loads it into Docker in one step.
+
+2. Verify the loaded image:
+   ```bash
+   docker images lrillumio
+   ```
+
+   You should see the `lrillumio` image listed with its tag(s).
+
+3. Inspect the architecture of the loaded image:
+   ```bash
+   docker inspect lrillumio:latest --format '{{.Architecture}}'
+   ```
+
+   This will confirm the architecture of the loaded image (e.g., `amd64` for x86_64 systems).
+
+Note: Ensure you have sufficient disk space on both the development and target systems for the Docker image and the compressed tarball during this process.
 
 ### Running with Docker
 
