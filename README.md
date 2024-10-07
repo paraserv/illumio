@@ -118,19 +118,64 @@ python app/main.py
 
 ### Building the Docker Image
 
-Navigate to the project root and run:
+You have multiple options for building the Docker image, depending on your system architecture and requirements:
 
+#### Option 1: Using Docker Buildx (Recommended for Multi-Platform Support)
+
+Docker Buildx allows you to build images for multiple platforms. Navigate to the project root and run:
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 -t lrillumio:latest . --load
+```
+
+- **Platform Options**:
+  - `linux/amd64`: For Intel/AMD 64-bit systems (most common, includes Rocky 9/RHEL 9)
+  - `linux/arm64`: For ARM 64-bit systems (e.g., Apple Silicone M1/M2/M3/M4, some AWS instances)
+  - `windows/amd64`: For Windows Server (add this if targeting Windows containers)
+  - Add or remove platforms as needed, separated by commas
+
+- **Flags**:
+  - `--load`: Loads the image into Docker after building
+  - `--push`: Use instead of `--load` if you want to push to a registry
+
+#### Option 2: Building for Specific Architectures
+
+For Rocky 9/RHEL 9 (and most x86_64 Linux distributions):
 ```bash
 docker buildx build --platform linux/amd64 -t lrillumio:latest . --load
 ```
 
-- **Note**: The `--load` flag loads the image into Docker after building. Ensure Docker Buildx is installed.
+For ARM-based macOS (Apple Silicon):
+```bash
+docker buildx build --platform linux/arm64/v8 -t lrillumio:latest . --load
+```
 
-Validate the image:
+For Windows Server (when using Windows containers):
+```bash
+docker buildx build --platform windows/amd64 -t lrillumio:latest . --load
+```
+
+#### Option 3: Traditional Docker Build
+
+If you don't need multi-platform support or don't have Buildx set up, you can use the traditional `docker build` command:
+
+```bash
+docker build -t lrillumio:latest .
+```
+
+This will build the image for your current system's architecture.
+
+- **Note**: Ensure Docker Buildx is installed and set up correctly for multi-platform builds.
+
+#### Validating the Build
+
+After building with any method, verify the image:
 
 ```bash
 docker images
 ```
+
+You should see `lrillumio` listed with the `latest` tag.
 
 ### Running with Docker
 
