@@ -4,113 +4,137 @@ Version: 1.0.0
 
 ## Overview
 
-The LR Illumio S3 Log Processor is a robust Python application designed to fetch, process, and forward Illumio logs stored in AWS S3 buckets to a SIEM (Security Information and Event Management) system via syslog. It's specifically built for LogRhythm SIEM and is optimized to parse under the Open Collector log source type. This processor can handle two primary log types: summary logs and auditable event logs, and works best with two virtual log source types for Illumio Cloud Summaries and Illumio Cloud Audit.
+The **LR Illumio S3 Log Processor** is a robust and scalable Python application designed to fetch, process, and forward Illumio Cloud logs stored in AWS S3 buckets to a SIEM (Security Information and Event Management) system via syslog. Specifically tailored for LogRhythm SIEM, it is optimized to parse logs under the Open Collector log source type. The processor handles two primary log types:
 
-Key Features:
+- **Summary Logs**: High volume logs recording process or network activities.
+- **Auditable Event Logs**: Low volume logs containing important security events, such as request.authentication_failed.
 
-- Log Retrieval: Fetches logs from AWS S3 buckets.
-- Log Processing: Transforms logs based on their type.
-- SIEM Forwarding: Forwards logs to a SIEM system via syslog (TCP/UDP).
-- Rate Limiting: Implements rate limiting with various options for optimal performance.
-- Health Monitoring: Provides health reporting and monitoring capabilities.
-- Container Support: Can run as a standalone application or within a Docker container.
+The application is ideal for environments that require efficient log ingestion and processing, leveraging rate limiting, health monitoring, and containerization for optimal performance.
 
 ## Table of Contents
 
 1. [Requirements](#requirements)
-2. [Installation](#installation)
-3. [Configuration](#configuration)
-4. [Running the Application](#running-the-application)
-5. [Docker Support](#docker-support)
-6. [Monitoring and Maintenance](#monitoring-and-maintenance)
-7. [Troubleshooting](#troubleshooting)
-8. [License](#license)
-9. [Contributing](#contributing)
-10. [Support](#support)
-11. [Prerequisites](#prerequisites)
-12. [Security Considerations](#security-considerations)
-13. [Updating](#updating)
-14. [Performance Tuning](#performance-tuning)
+2. [Prerequisites](#prerequisites)
+3. [Installation](#installation)
+4. [Configuration](#configuration)
+5. [Running the Application](#running-the-application)
+6. [Docker Support](#docker-support)
+    - [Building the Docker Image](#building-the-docker-image)
+    - [Running with Docker](#running-with-docker)
+    - [Using Docker Compose](#using-docker-compose)
+7. [Monitoring and Maintenance](#monitoring-and-maintenance)
+    - [Available Utilities](#available-utilities)
+    - [Log Rotation](#log-rotation)
+    - [Log Levels](#log-levels)
+    - [Interpreting Common Log Messages](#interpreting-common-log-messages)
+8. [Troubleshooting](#troubleshooting)
+9. [Updating](#updating)
+10. [Performance Tuning](#performance-tuning)
+11. [Security Considerations](#security-considerations)
+12. [License](#license)
+13. [Contributing](#contributing)
+14. [Support](#support)
 
 ## Requirements
 
 ### Local Installation (Mac, Linux, Windows)
 
-- Python 3.12.7
-- pip (Python package manager)
+- Python 3.12.7 or higher
+- `pip` (Python package manager)
 - Git
 
 ### Docker Container
 
-- Docker Engine
-- Docker Compose (optional)
+- Docker Engine (version 19.03 or higher)
+- Docker Compose (optional, version 1.25 or higher)
 
 ### Common Requirements
 
-- AWS S3 bucket with Illumio logs
-- SIEM system capable of receiving syslog messages
+- AWS S3 bucket containing Illumio logs
+- SIEM system capable of receiving syslog messages (TCP or UDP)
+
+## Prerequisites
+
+- **AWS Account**: With access to the S3 bucket containing Illumio logs.
+- **SIEM System Access**: Ensure the SIEM is reachable from the host machine or Docker container.
+- **Network Access**: Open required ports in firewalls or network ACLs for outbound traffic to AWS S3 and the SIEM system.
+- **AWS Credentials**: Access Key ID and Secret Access Key with permissions to read from the S3 bucket.
 
 ## Installation
 
-1. Clone the Repository:
-   ```
+1. **Clone the Repository**:
+
+   ```bash
    git clone https://github.com/paraserv/illumio.git
    cd illumio
    ```
 
-2. Local Installation:
-   ```
+2. **Local Installation**:
+
+   ```bash
    python -m venv .venv
    source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+   pip install --upgrade pip
    pip install -r requirements.txt
    ```
 
 ## Configuration
 
-1. Edit `settings.ini`:
-   - Configure general settings, paths, logging levels, S3 configurations, syslog details, and optional parameters for health reporting, queue monitoring, and NTP settings.
-   - Avoid inline comments to ensure compatibility.
-   - If running in a Docker container, copy the settings.ini file to the root path of where you'll run the container. This is mounted as a volume and can be edited directly in the container.
+1. **Edit `settings.ini`**:
 
-2. Create an `.env` File:
-   ```
+   - Configure the following sections:
+     - **General Settings**: Application behavior, paths, and logging levels.
+     - **AWS S3 Configuration**: Bucket name, prefixes, and region.
+     - **Syslog Settings**: SIEM IP address, port, protocol (TCP/UDP), and formatting options.
+     - **Rate Limiting**: Control log processing and forwarding rates.
+     - **Health Reporting**: Enable or disable health checks and reporting intervals.
+     - **NTP Settings**: Configure if synchronizing system time is necessary.
+   - **Important**: Avoid inline comments and ensure no extraneous whitespace.
+
+2. **Create an `.env` File**:
+
+   ```ini
    AWS_ACCESS_KEY_ID=your_aws_access_key
    AWS_SECRET_ACCESS_KEY=your_aws_secret_key
    AWS_DEFAULT_REGION=your_aws_region
    S3_BUCKET_NAME=your_s3_bucket_name
    ```
 
-   Important: Do not add quotation marks or inline comments to any of the lines in the .env file.
+   - **Important**: Do not add quotation marks or inline comments.
+   - **Security**: Store this file securely and exclude it from version control (`.gitignore`).
 
 ## Running the Application
 
 To run the application locally:
-```
+
+```bash
 python app/main.py
 ```
+
+- **Logs**: Check the `logs/` directory for application logs.
+- **State**: The application maintains state in the `state/` directory to track processed files.
 
 ## Docker Support
 
 ### Building the Docker Image
 
 Navigate to the project root and run:
-```
-docker build -t lrillumio .
+
+```bash
+docker buildx build --platform linux/amd64 -t lrillumio:latest . --load
 ```
 
-Note: If using Docker Desktop, you can use the --load flag to load the image into Docker Desktop:
-```
-docker build -t lrillumio . --load
-```
+- **Note**: The `--load` flag loads the image into Docker after building. Ensure Docker Buildx is installed.
 
-Validate the image was created and is available:
-```
+Validate the image:
+
+```bash
 docker images
-``` 
+```
 
 ### Running with Docker
 
-```
+```bash
 docker run -d \
   --name lrillumio \
   -e LOCAL_USER_ID=$(id -u) \
@@ -126,24 +150,17 @@ docker run -d \
   lrillumio:latest
 ```
 
-Other useful Docker commands:
-```
-docker ps -a             #view all containers, even stopped ones
-docker logs lrillumio    #view the logs of the container
-docker stop lrillumio    #stop the container
-docker start lrillumio   #start the container
-docker rm -f lrillumio   #forcefully remove the container
-docker images            #view all images
-docker rmi lrillumio     #remove the image
-docker inspect lrillumio #view container details
-```
-
-The above run command will utilize the current user's ID and group ID to run the container and adjust the file permissions
-on the mounted volumes. Adjust the memory and CPU settings as needed.
+- **Explanation**:
+  - `--env-file .env`: Passes AWS credentials securely.
+  - `-v $(pwd)/state:/app/state`: Persists application state between restarts.
+  - `-v $(pwd)/logs:/app/logs`: Access logs on the host system.
+  - `--memory` and `--cpus`: Resource limits for the container.
+  - `--restart unless-stopped`: Ensures the container restarts automatically unless stopped manually.
 
 ### Using Docker Compose
 
-1. Create a `docker-compose.yml` file:
+1. **Create a `docker-compose.yml` File**:
+
    ```yaml
    version: '3'
    services:
@@ -157,122 +174,168 @@ on the mounted volumes. Adjust the memory and CPU settings as needed.
          - ./settings.ini:/app/settings.ini:ro
          - ./logs:/app/logs
          - ./state:/app/state
+       ports:
+         - "514:514"  # Adjust if exposing ports is necessary
        restart: unless-stopped
+       deploy:
+         resources:
+           limits:
+             cpus: '0.5'
+             memory: 512M
    ```
 
-2. Set the LOCAL_USER_ID and LOCAL_GROUP_ID environment variables:
-   ```
+2. **Set Environment Variables**:
+
+   ```bash
    export LOCAL_USER_ID=$(id -u)
    export LOCAL_GROUP_ID=$(id -g)
    ```
 
-3. Run the application using Docker Compose:
-   ```
+3. **Run with Docker Compose**:
+
+   ```bash
    docker-compose up -d
    ```
 
+- **Additional Commands**:
+
+  ```bash
+  docker-compose logs -f
+  docker-compose down
+  ```
+
 ## Monitoring and Maintenance
 
-- Log Files: The application writes log files to the specified directory, including `app.json` for general logs and `health_report.json` for health reports if enabled.
-- Container Troubleshooting: Access the container shell:
-  ```
+- **Access Container Shell**:
+
+  ```bash
   docker exec -it lrillumio /bin/bash
   ```
-Available utilities:
-   ```
-   python app/db_stats.py
-   python app/s3_time_validator.py
-   ```
 
-Exit the container's bash shell:
-   ```
-   exit
-   ```  
+### Available Utilities
 
-Alternatively, you can run these utilities directly without entering the container:
+- **Database Statistics**:
 
-```
-docker exec lrillumio python app/s3_time_validator.py
+  ```bash
+  python app/db_stats.py [OPTIONS]
+  ```
 
-docker exec lrillumio python app/db_stats.py
-```
-`db_stats.py`
-Usage: python queue_stats.py [OPTIONS]
-Options:
-  -f, --follow     Run in continuous monitoring mode
-  -n SECONDS       Specify refresh interval in seconds (default: 5)
-  -s, --sample     Show a sample log in the output
-  --db_path PATH   Path to the log_queue.db file
-  -h, --help       Show this help message and exit
+  **Options**:
+
+  - `-f`, `--follow`: Continuous monitoring.
+  - `-n SECONDS`: Refresh interval (default: 5).
+  - `-s`, `--sample`: Show a sample log.
+  - `--db_path PATH`: Path to `log_queue.db`.
+  - `-h`, `--help`: Show help message.
+
+- **S3 Time Validator**:
+
+  ```bash
+  python app/s3_time_validator.py
+  ```
+
+  **Purpose**: Validates the time difference between the local system and AWS S3, important for authentication.
 
 ### Log Rotation
-The application uses a RotatingFileHandler for log rotation. Logs are automatically rotated when they reach a certain size, as specified in the `settings.ini` file.
+
+The application uses a `RotatingFileHandler` for log rotation. Logs automatically rotate based on the size configured in `settings.ini`.
 
 ### Log Levels
-Adjust the log level in `settings.ini` to control the verbosity of logging:
-- DEBUG: Detailed information, typically of interest only when diagnosing problems.
-- INFO: Confirmation that things are working as expected.
-- WARNING: An indication that something unexpected happened, or indicative of some problem in the near future.
-- ERROR: Due to a more serious problem, the software has not been able to perform some function.
-- CRITICAL: A serious error, indicating that the program itself may be unable to continue running.
+
+Adjust the log level in `settings.ini` under the `[logging]` section:
+
+- **Levels**:
+  - `DEBUG`
+  - `INFO`
+  - `WARNING`
+  - `ERROR`
+  - `CRITICAL`
 
 ### Interpreting Common Log Messages
-- "Processing batch of X logs": Normal operation, indicates the number of logs being processed in a batch.
-- "Rate limit reached": The application has hit the configured rate limit and is slowing down processing.
-- "Failed to connect to SIEM": Check network connectivity and SIEM configuration.
-- "S3 access denied": Verify AWS credentials and S3 bucket permissions.
+
+- **"Processing batch of X logs"**: Normal operation.
+- **"Rate limit reached"**: Throttling to maintain configured rate.
+- **"Failed to connect to SIEM"**: Check network connectivity and SIEM status.
+- **"S3 access denied"**: Verify AWS credentials and S3 permissions.
 
 ## Troubleshooting
 
-- Check logs for errors or warnings.
-- Verify AWS credentials and S3 permissions.
-- Ensure the SIEM system is reachable and configured for syslog.
+- **Container Exits Immediately**:
+  - **Solution**: Run `docker logs lrillumio` to view error messages.
+  - **Common Issues**:
+    - Missing or incorrect environment variables.
+    - Improper volume mounts.
 
-- Issue: Container exits immediately after starting
-  Solution: Check the Docker logs for error messages. Ensure all required environment variables are set and volumes are correctly mounted.
+- **Logs Not Sent to SIEM**:
+  - **Solution**: Verify SIEM network connectivity and syslog configuration in `settings.ini`.
 
-- Issue: Logs are not being sent to the SIEM
-  Solution: Verify SIEM connectivity, check syslog configuration in `settings.ini`, and ensure the SIEM is listening on the specified port.
+- **High Resource Usage**:
+  - **Solution**: Adjust `batch_size` and `rate_limit` in `settings.ini`. Increase container resource limits if necessary.
 
-- Issue: High CPU or memory usage
-  Solution: Adjust the rate limiting settings in `settings.ini`, or increase the Docker container's resource limits.
-
-## Prerequisites
-
-- AWS account with appropriate S3 bucket access
-- SIEM system with syslog receiving capabilities
-- [Any other specific prerequisites]
-
-## Security Considerations
-
-- Store the .env file securely and never commit it to version control
-- Regularly rotate AWS access keys
-- Ensure the S3 bucket has appropriate access controls
+- **Time Synchronization Issues**:
+  - **Symptom**: Authentication failures when accessing AWS S3.
+  - **Solution**: Ensure system time is synchronized via NTP. Use `s3_time_validator.py` to check time differences.
 
 ## Updating
 
 ### Local Installation
-1. Pull the latest changes: `git pull origin main`
-2. Update dependencies: `pip install -r requirements.txt --upgrade`
-3. Restart the application
+
+1. **Pull Latest Changes**:
+
+   ```bash
+   git pull origin main
+   ```
+
+2. **Update Dependencies**:
+
+   ```bash
+   pip install -r requirements.txt --upgrade
+   ```
+
+3. **Restart Application**.
 
 ### Docker Deployment
-1. Obtain the latest docker image and load it: `docker load < lrillumio_latest.tar.gz`
-2. Stop the existing container: `docker stop lrillumio`
-3. Remove the old container: `docker rm lrillumio`
-4. Start a new container with the updated image (use the run command from the "Running with Docker" section)
+
+1. **Build or Obtain Latest Image**:
+
+   ```bash
+   docker buildx build --platform linux/amd64 -t lrillumio:latest . --load
+   ```
+
+2. **Stop and Remove Existing Container**:
+
+   ```bash
+   docker stop lrillumio
+   docker rm lrillumio
+   ```
+
+3. **Start New Container** (use the run command from [Running with Docker](#running-with-docker)).
 
 ## Performance Tuning
 
-- Adjust the `batch_size` in `settings.ini` to optimize the balance between processing speed and resource usage.
-- Modify the `rate_limit` setting to control the maximum number of logs processed per second.
-- Adjust the `MAX_MESSAGES_PER_SECOND` setting to control the maximum number of logs sent via SYSLOG to the SIEM per second (MPS).
-- For Docker deployments, adjust the `--memory` and `--cpus` flags in the `docker run` command based on available resources and processing requirements.
+- **Batch Size**: Increase or decrease `batch_size` in `settings.ini` to control the number of logs processed per batch.
+- **Rate Limits**:
+  - **Log Processing Rate**: Adjust `rate_limit` settings.
+  - **Syslog Sending Rate**: Modify `MAX_MESSAGES_PER_SECOND` in `settings.ini`.
+- **Resource Allocation**:
+  - Adjust `--memory` and `--cpus` in the Docker run command.
+- **Dynamic Rate Adjustment**:
+  - Enable `enable_dynamic_rate` in `settings.ini` to allow the application to adjust rates based on current performance metrics.
+
+## Security Considerations
+
+- **Credentials Management**:
+  - Do not commit `.env` files to version control.
+  - Store AWS credentials securely.
+- **Access Controls**:
+  - Limit network exposure of the container.
+  - Ensure S3 buckets have appropriate IAM policies.
+- **Encryption**:
+  - Use secure channels (TLS) for syslog transmission if supported by the SIEM.
 
 ## License
 
-This project is licensed under the MIT License. The author is Nathan Church
-with Exabeam, Inc., formerly LogRhythm, Inc.
+This project is licensed under the MIT License. The author is Nathan Church with Exabeam, Inc., formerly LogRhythm, Inc.
 
 ## Contributing
 
