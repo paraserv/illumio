@@ -37,7 +37,7 @@ The application is ideal for environments that require efficient log ingestion a
 
 ## Requirements
 
-### Local Installation (Mac, Linux, Windows)
+### Local Installation on Linux, Mac, or WSL (Windows Subsystem for Linux)
 
 - Python 3.12.7 or higher
 - `pip` (Python package manager)
@@ -73,7 +73,7 @@ The application is ideal for environments that require efficient log ingestion a
 
    ```bash
    python -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+   source .venv/bin/activate
    pip install --upgrade pip
    pip install -r requirements.txt
    ```
@@ -88,7 +88,7 @@ The application is ideal for environments that require efficient log ingestion a
      - **Syslog Settings**: SIEM IP address, port, protocol (TCP/UDP), and formatting options.
      - **Rate Limiting**: Control log processing and forwarding rates.
      - **Health Reporting**: Enable or disable health checks and reporting intervals.
-     - **NTP Settings**: Configure if synchronizing system time is necessary.
+     - **NTP Settings**: Configure if time sync validation is important..
    - **Important**: Avoid inline comments and ensure no extraneous whitespace.
 
 2. **Create an `.env` File**:
@@ -122,21 +122,28 @@ You have multiple options for building the Docker image, depending on your syste
 
 #### Option 1: Using Docker Buildx (Recommended for Multi-Platform Support)
 
-Docker Buildx allows you to build images for multiple platforms. Navigate to the project root and run:
+Docker Buildx allows you to build images for multiple platforms. 
 
-```bash
-docker buildx build --platform linux/amd64,linux/arm64 -t lrillumio:latest . --load
-```
+1. Build for amd64 architecture and load the image into Docker:
+   ```bash
+   docker buildx build --platform linux/amd64 -t lrillumio:latest . --load
+   ```
+
+2. Build for multiple platforms (creates tarballs):
+   ```bash
+   docker buildx build --platform linux/amd64,linux/arm64 -t lrillumio:latest . --output type=tar,dest=lrillumio.tar
+   ```
+
+   This command creates a tarball containing images for both amd64 and arm64 architectures.
 
 - **Platform Options**:
   - `linux/amd64`: For Intel/AMD 64-bit systems (most common, includes Rocky 9/RHEL 9)
-  - `linux/arm64`: For ARM 64-bit systems (e.g., Apple Silicone M1/M2/M3/M4, some AWS instances)
-  - `windows/amd64`: For Windows Server (add this if targeting Windows containers)
+  - `linux/arm64`: For ARM 64-bit systems (e.g., Apple Silicon M1/M2/M3/M4, some AWS instances)
   - Add or remove platforms as needed, separated by commas
 
 - **Flags**:
-  - `--load`: Loads the image into Docker after building
-  - `--push`: Use instead of `--load` if you want to push to a registry
+  - `--load`: Loads the image into Docker after building (only works for single-platform builds)
+  - `--output`: Specifies the output format and destination
 
 #### Option 2: Building for Specific Architectures
 
@@ -149,11 +156,7 @@ For ARM-based macOS (Apple Silicon):
 ```bash
 docker buildx build --platform linux/arm64/v8 -t lrillumio:latest . --load
 ```
-
-For Windows Server (when using Windows containers):
-```bash
-docker buildx build --platform windows/amd64 -t lrillumio:latest . --load
-```
+- **Note**: Ensure Docker Buildx is installed and set up correctly if using the buildx command.
 
 #### Option 3: Traditional Docker Build
 
@@ -163,9 +166,7 @@ If you don't need multi-platform support or don't have Buildx set up, you can us
 docker build -t lrillumio:latest .
 ```
 
-This will build the image for your current system's architecture.
-
-- **Note**: Ensure Docker Buildx is installed and set up correctly for multi-platform builds.
+This will build the image for your current system's architecture. (add --load if you want to load the image into Docker on the current system)
 
 #### Validating the Build
 
@@ -176,6 +177,13 @@ docker images
 ```
 
 You should see `lrillumio` listed with the `latest` tag.
+
+To inspect the architecture of the built image:
+```bash
+docker inspect lrillumio:latest --format '{{.Architecture}}'
+```
+
+This will output the architecture (e.g., `amd64` or `arm64`).
 
 ### Running with Docker
 
